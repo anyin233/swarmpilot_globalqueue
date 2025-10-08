@@ -1,7 +1,7 @@
 [project]
 name = "swarmpilot-globalqueue"
 version = "0.1.0"
-description = "Add your description here"
+description = "SwarmPilot Global Queue - Load balancing service for task instances"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,4 +9,8 @@ dependencies = [
     "httpx>=0.28.1",
     "loguru>=0.7.3",
     "pyyaml>=6.0.3",
+    "fastapi>=0.115.6",
+    "uvicorn>=0.34.0",
+    "typer>=0.15.2",
+    "requests>=2.32.3",
 ]
