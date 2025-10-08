@@ -17,14 +17,14 @@ task_routing_log: Dict[str, Dict[str, Any]] = {}
 
 
 class TaskEnqueueRequest(BaseModel):
-    """任务入队请求，与 TaskInstance 格式兼容"""
-    input_data: Dict[str, Any] = Field(..., description="任务输入数据")
-    task_type: Optional[str] = Field(None, description="任务类型（ocr, llm等）")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="任务元数据，包含模型信息和特征")
+    """Task enqueue request, compatible with TaskInstance format"""
+    input_data: Dict[str, Any] = Field(..., description="Task input data")
+    task_type: Optional[str] = Field(None, description="Task type (ocr, llm, etc.)")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Task metadata, including model info and features")
 
 
 class TaskEnqueueResponse(BaseModel):
-    """任务入队响应"""
+    """Task enqueue response"""
     task_id: str
     model_name: str
     target_host: str
@@ -34,7 +34,7 @@ class TaskEnqueueResponse(BaseModel):
 
 
 class TaskRoutingInfo(BaseModel):
-    """任务路由信息"""
+    """Task routing information"""
     task_id: str
     model_name: str
     target_host: str
@@ -44,7 +44,7 @@ class TaskRoutingInfo(BaseModel):
 
 
 class TaskInstanceInfo(BaseModel):
-    """TaskInstance 信息"""
+    """TaskInstance information"""
     uuid: str
     host: str
     models: List[Dict[str, Any]]
@@ -52,7 +52,7 @@ class TaskInstanceInfo(BaseModel):
 
 
 class GlobalQueueInfo(BaseModel):
-    """GlobalQueue 信息"""
+    """GlobalQueue information"""
     total_task_instances: int
     task_instances: List[TaskInstanceInfo]
     total_models: int
@@ -61,7 +61,7 @@ class GlobalQueueInfo(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    """启动时初始化 GlobalQueue"""
+    """Initialize GlobalQueue on startup"""
     global global_queue
     global_queue = SwarmPilotGlobalMsgQueue()
     logger.info("GlobalQueue API started")
@@ -69,25 +69,25 @@ async def startup_event():
 
 @app.get("/health")
 async def health():
-    """健康检查"""
+    """Health check"""
     return {"status": "ok", "service": "GlobalQueue"}
 
 
 @app.post("/queue/enqueue", response_model=TaskEnqueueResponse)
 async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
     """
-    接收任务并转发到最优的 TaskInstance
+    Accept task and route to optimal TaskInstance
 
     Args:
-        request: 任务请求，包含 input_data, task_type, metadata
+        request: Task request containing input_data, task_type, metadata
 
     Returns:
-        任务入队响应，包含 task_id, 目标模型信息等
+        Task enqueue response with task_id, target model info, etc.
     """
     if global_queue is None:
         raise HTTPException(status_code=503, detail="GlobalQueue not initialized")
 
-    # 从 metadata 中提取 model_id
+    # Extract model_id from metadata
     model_id = request.metadata.get("model_id")
     if not model_id:
         raise HTTPException(
@@ -95,7 +95,7 @@ async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
             detail="Missing 'model_id' in metadata"
         )
 
-    # 构造 GlobalRequestMessage
+    # Construct GlobalRequestMessage
     try:
         from uuid import uuid4
         task_uuid = uuid4()
@@ -107,13 +107,13 @@ async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
             uuid=task_uuid
         )
 
-        # 调用 GlobalQueue 的 enqueue 方法
+        # Call GlobalQueue's enqueue method
         response = global_queue.enqueue(global_msg)
 
-        # 获取路由信息
+        # Get routing information
         routing_info = global_queue.get_last_routing_info()
 
-        # 记录路由日志
+        # Record routing log
         task_routing_log[str(response.task_id)] = {
             "task_id": str(response.task_id),
             "model_name": routing_info["model_name"],
@@ -145,13 +145,13 @@ async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
 @app.get("/queue/query-target", response_model=TaskRoutingInfo)
 async def query_task_target(task_id: str):
     """
-    查询任务的转发目标信息
+    Query task routing target information
 
     Args:
-        task_id: 任务ID
+        task_id: Task ID
 
     Returns:
-        任务路由信息，包含目标模型名称、IP、端口
+        Task routing info including target model name, IP, port
     """
     if task_id not in task_routing_log:
         raise HTTPException(
@@ -166,10 +166,10 @@ async def query_task_target(task_id: str):
 @app.get("/info", response_model=GlobalQueueInfo)
 async def get_info():
     """
-    获取 GlobalQueue 的状态信息
+    Get GlobalQueue status information
 
     Returns:
-        包含所有连接的 TaskInstance 及其模型信息
+        Information about all connected TaskInstances and their models
     """
     if global_queue is None:
         raise HTTPException(status_code=503, detail="GlobalQueue not initialized")
@@ -179,7 +179,7 @@ async def get_info():
 
     for ti in global_queue.taskinstances:
         try:
-            # 获取 TaskInstance 的模型列表
+            # Get model list from TaskInstance
             models_response = ti.instance.list_models()
             models = [
                 {
@@ -222,13 +222,13 @@ async def get_info():
 @app.post("/config/load-task-instances")
 async def load_task_instances(config_path: str = Body(..., embed=True)):
     """
-    从配置文件加载 TaskInstance 列表
+    Load TaskInstance list from configuration file
 
     Args:
-        config_path: YAML 配置文件路径
+        config_path: YAML configuration file path
 
     Returns:
-        加载结果
+        Loading result
     """
     if global_queue is None:
         raise HTTPException(status_code=503, detail="GlobalQueue not initialized")
@@ -251,10 +251,10 @@ async def load_task_instances(config_path: str = Body(..., embed=True)):
 @app.post("/queue/update")
 async def update_queues():
     """
-    更新所有队列的状态信息
+    Update status information for all queues
 
     Returns:
-        更新结果
+        Update result
     """
     if global_queue is None:
         raise HTTPException(status_code=503, detail="GlobalQueue not initialized")

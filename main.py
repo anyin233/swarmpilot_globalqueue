@@ -37,15 +37,15 @@ class SwarmPilotGlobalMsgQueue:
     def __init__(self):
         self.queues: Dict[str, PriorityQueue] = {}  # For each model, there will be a Priority Queue
         self.taskinstances: List[TaskInstance] = []  # Store all task instances
-        self.last_routing_info: Optional[Dict[str, Any]] = None  # 最近一次路由信息
+        self.last_routing_info: Optional[Dict[str, Any]] = None  # Last routing information
 
     def load_task_instance_from_config(self, path: str):
-        """从配置文件加载 Task Instance"""
+        """Load Task Instance from configuration file"""
         with open(path, "r") as f:
             data = yaml.safe_load(f)
         instances = data['instances']
 
-        # 支持列表格式的配置
+        # Support list format configuration
         if isinstance(instances, list):
             for instance_config in instances:
                 base_url = f"http://{instance_config['host']}:{instance_config['port']}"
@@ -54,7 +54,7 @@ class SwarmPilotGlobalMsgQueue:
                 self.taskinstances.append(TaskInstance(uuid=ti_uuid, instance=client))
                 logger.info(f"Loaded Task Instance {ti_uuid} from {base_url}")
         else:
-            # 兼容旧的字典格式
+            # Compatible with old dictionary format
             base_url = f"http://{instances['host']}:{instances['port']}"
             ti_uuid = uuid4()
             client = TaskInstanceClient(base_url)
@@ -62,43 +62,43 @@ class SwarmPilotGlobalMsgQueue:
             logger.info(f"Loaded Task Instance {ti_uuid} from {base_url}")
 
     def update_queues(self):
-        """更新所有优先队列的状态"""
-        # 清空所有队列
+        """Update status of all priority queues"""
+        # Clear all queues
         self.queues.clear()
 
-        # 遍历所有 Task Instance
+        # Iterate through all Task Instances
         for ti in self.taskinstances:
             client = ti.instance
-            # 获取该 Task Instance 上所有模型
+            # Get all models on this Task Instance
             models = client.list_models().models
 
             for model_info in models:
                 model_name = model_info.model
                 port = model_info.port
 
-                # 尝试获取队列状态
+                # Try to get queue status
                 try:
                     queue_status = client.get_queue_status(port=port)
                     queue_size = queue_status.queue_size
 
-                    # 如果队列有任务，获取预测信息
+                    # If queue has tasks, get prediction information
                     if queue_size > 0:
                         prediction = client.predict_queue(port=port)
                         expected_ms = prediction.expected_ms
                         error_ms = prediction.error_ms
                     else:
-                        # 如果队列为空，使用默认值
+                        # If queue is empty, use default values
                         expected_ms = 0.0
                         error_ms = 0.0
 
                 except Exception as e:
-                    # 如果队列不存在或其他错误，使用默认值
+                    # If queue doesn't exist or other error, use default values
                     logger.debug(f"Queue for {model_name}:{port} not initialized yet: {e}")
                     queue_size = 0
                     expected_ms = 0.0
                     error_ms = 0.0
 
-                # 创建队列对象
+                # Create queue object
                 queue_obj = ModelMsgQueue(
                     expected_ms=expected_ms,
                     error_ms=error_ms,
@@ -108,20 +108,20 @@ class SwarmPilotGlobalMsgQueue:
                     ti_uuid=ti.uuid
                 )
 
-                # 确保该模型的优先队列存在
+                # Ensure priority queue exists for this model
                 if model_name not in self.queues:
                     self.queues[model_name] = PriorityQueue()
 
-                # 将队列信息加入优先队列
+                # Add queue info to priority queue
                 self.queues[model_name].put(queue_obj)
 
         logger.info(f"Updated queues for {len(self.queues)} models")
 
     def enqueue(self, task: GlobalRequestMessage):
-        """将任务发送到最优的队列"""
+        """Send task to optimal queue"""
         model_id = task.model_id
 
-        # 检查是否存在该模型的队列
+        # Check if queue exists for this model
         if model_id not in self.queues:
             raise RuntimeError(f"No queue for model {model_id}")
 
@@ -130,10 +130,10 @@ class SwarmPilotGlobalMsgQueue:
         if cur_q.empty():
             raise RuntimeError(f"No available Task Instance for model {model_id}")
 
-        # 从优先队列中获取预期时间最短的队列
+        # Get queue with shortest expected time from priority queue
         selected_q = cur_q.get()
 
-        # 找到对应的 Task Instance 客户端
+        # Find corresponding Task Instance client
         ti_client = None
         ti_host = None
         for ti in self.taskinstances:
@@ -145,7 +145,7 @@ class SwarmPilotGlobalMsgQueue:
         if ti_client is None:
             raise RuntimeError(f"Task Instance {selected_q.ti_uuid} not found")
 
-        # 将任务发送到选定的队列
+        # Send task to selected queue
         task_obj = Task(
             input_data=task.input_features,
             metadata=task.input_features.get('metadata', {})
@@ -153,7 +153,7 @@ class SwarmPilotGlobalMsgQueue:
 
         response = ti_client.enqueue_task(port=selected_q.port, task=task_obj)
 
-        # 保存路由信息
+        # Save routing information
         self.last_routing_info = {
             "model_name": selected_q.model_name,
             "target_host": ti_host,
@@ -166,7 +166,7 @@ class SwarmPilotGlobalMsgQueue:
             f"at {ti_host} (expected: {selected_q.expected_ms}ms, queue_size: {response.queue_size})"
         )
 
-        # 更新该队列的信息并放回优先队列
+        # Update queue information and put back to priority queue
         updated_prediction = ti_client.predict_queue(port=selected_q.port)
         updated_q = ModelMsgQueue(
             expected_ms=updated_prediction.expected_ms,
@@ -181,7 +181,7 @@ class SwarmPilotGlobalMsgQueue:
         return response
 
     def get_last_routing_info(self) -> Dict[str, Any]:
-        """获取最近一次路由信息"""
+        """Get last routing information"""
         if self.last_routing_info is None:
             raise RuntimeError("No routing information available")
         return self.last_routing_info

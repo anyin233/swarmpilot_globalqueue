@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GlobalQueue CLI 工具
-使用 typer 实现命令行接口
+GlobalQueue CLI Tool
+Command-line interface implemented using typer
 """
 import typer
 import requests
@@ -17,34 +17,34 @@ app = typer.Typer(help="SwarmPilot GlobalQueue CLI")
 
 @app.command()
 def start(
-    host: str = typer.Option("0.0.0.0", "--host", "-h", help="服务监听地址"),
-    port: int = typer.Option(8102, "--port", "-p", help="服务监听端口"),
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Service listen address"),
+    port: int = typer.Option(8102, "--port", "-p", help="Service listen port"),
     config: Optional[Path] = typer.Option(
         None,
         "--config",
         "-c",
-        help="TaskInstance 配置文件路径",
+        help="TaskInstance configuration file path",
         exists=True
     ),
-    reload: bool = typer.Option(False, "--reload", help="启用热重载"),
-    log_level: str = typer.Option("info", "--log-level", help="日志级别")
+    reload: bool = typer.Option(False, "--reload", help="Enable hot reload"),
+    log_level: str = typer.Option("info", "--log-level", help="Log level")
 ):
     """
-    启动 GlobalQueue 服务
+    Start GlobalQueue service
 
-    示例:
+    Example:
         globalqueue start --host 0.0.0.0 --port 8102 --config task_instances.yaml
     """
     logger.info(f"Starting GlobalQueue on {host}:{port}")
 
-    # 如果提供了配置文件，在启动后自动加载
+    # If config file provided, load it on startup
     if config:
         logger.info(f"TaskInstance config will be loaded from: {config}")
-        # 将配置路径设为环境变量，供 API 启动时读取
+        # Set config path as environment variable for API to read on startup
         import os
         os.environ["GLOBALQUEUE_CONFIG"] = str(config.absolute())
 
-    # 启动 FastAPI 服务
+    # Start FastAPI service
     uvicorn.run(
         "api:app",
         host=host,
@@ -56,18 +56,18 @@ def start(
 
 @app.command()
 def query(
-    task_id: str = typer.Argument(..., help="要查询的任务ID"),
+    task_id: str = typer.Argument(..., help="Task ID to query"),
     api_url: str = typer.Option(
         "http://localhost:8102",
         "--api-url",
         "-u",
-        help="GlobalQueue API 地址"
+        help="GlobalQueue API address"
     )
 ):
     """
-    查询任务的转发目标信息
+    Query task routing target information
 
-    示例:
+    Example:
         globalqueue query abc123-def456 --api-url http://localhost:8102
     """
     try:
@@ -80,22 +80,22 @@ def query(
 
         data = response.json()
 
-        typer.echo(f"\n任务路由信息:")
-        typer.echo(f"  任务ID:       {data['task_id']}")
-        typer.echo(f"  模型名称:     {data['model_name']}")
-        typer.echo(f"  目标地址:     {data['target_host']}")
-        typer.echo(f"  目标端口:     {data['target_port']}")
-        typer.echo(f"  转发时间:     {data['timestamp']}")
-        typer.echo(f"  队列大小:     {data['queue_size']}")
+        typer.echo(f"\nTask Routing Information:")
+        typer.echo(f"  Task ID:        {data['task_id']}")
+        typer.echo(f"  Model Name:     {data['model_name']}")
+        typer.echo(f"  Target Host:    {data['target_host']}")
+        typer.echo(f"  Target Port:    {data['target_port']}")
+        typer.echo(f"  Routing Time:   {data['timestamp']}")
+        typer.echo(f"  Queue Size:     {data['queue_size']}")
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
-            typer.echo(f"错误: 任务 {task_id} 未找到", err=True)
+            typer.echo(f"Error: Task {task_id} not found", err=True)
         else:
-            typer.echo(f"错误: {e}", err=True)
+            typer.echo(f"Error: {e}", err=True)
         sys.exit(1)
     except Exception as e:
-        typer.echo(f"查询失败: {e}", err=True)
+        typer.echo(f"Query failed: {e}", err=True)
         sys.exit(1)
 
 
@@ -105,19 +105,19 @@ def info(
         "http://localhost:8102",
         "--api-url",
         "-u",
-        help="GlobalQueue API 地址"
+        help="GlobalQueue API address"
     ),
     json_output: bool = typer.Option(
         False,
         "--json",
         "-j",
-        help="以 JSON 格式输出"
+        help="Output in JSON format"
     )
 ):
     """
-    查询 GlobalQueue 的状态信息
+    Query GlobalQueue status information
 
-    示例:
+    Example:
         globalqueue info
         globalqueue info --json
     """
@@ -130,46 +130,46 @@ def info(
         if json_output:
             typer.echo(json.dumps(data, indent=2, ensure_ascii=False))
         else:
-            typer.echo(f"\nGlobalQueue 状态信息:")
-            typer.echo(f"  TaskInstance 总数: {data['total_task_instances']}")
-            typer.echo(f"  模型总数:          {data['total_models']}")
-            typer.echo(f"  活跃队列数:        {data['active_queues']}")
-            typer.echo(f"\nTaskInstance 列表:")
+            typer.echo(f"\nGlobalQueue Status:")
+            typer.echo(f"  Total TaskInstances: {data['total_task_instances']}")
+            typer.echo(f"  Total Models:        {data['total_models']}")
+            typer.echo(f"  Active Queues:       {data['active_queues']}")
+            typer.echo(f"\nTaskInstance List:")
 
             for ti in data['task_instances']:
                 typer.echo(f"\n  UUID: {ti['uuid']}")
                 typer.echo(f"  Host: {ti['host']}")
-                typer.echo(f"  状态: {ti['status']}")
-                typer.echo(f"  模型数量: {len(ti['models'])}")
+                typer.echo(f"  Status: {ti['status']}")
+                typer.echo(f"  Model Count: {len(ti['models'])}")
 
                 if ti['models']:
-                    typer.echo(f"  模型列表:")
+                    typer.echo(f"  Models:")
                     for model in ti['models']:
-                        typer.echo(f"    - {model['model']} (端口: {model['port']}, 状态: {model['status']})")
+                        typer.echo(f"    - {model['model']} (Port: {model['port']}, Status: {model['status']})")
 
     except requests.exceptions.ConnectionError:
-        typer.echo(f"错误: 无法连接到 {api_url}", err=True)
-        typer.echo("请确认 GlobalQueue 服务是否已启动", err=True)
+        typer.echo(f"Error: Cannot connect to {api_url}", err=True)
+        typer.echo("Please confirm GlobalQueue service is running", err=True)
         sys.exit(1)
     except Exception as e:
-        typer.echo(f"查询失败: {e}", err=True)
+        typer.echo(f"Query failed: {e}", err=True)
         sys.exit(1)
 
 
 @app.command()
 def load_config(
-    config: Path = typer.Argument(..., help="TaskInstance 配置文件路径", exists=True),
+    config: Path = typer.Argument(..., help="TaskInstance configuration file path", exists=True),
     api_url: str = typer.Option(
         "http://localhost:8102",
         "--api-url",
         "-u",
-        help="GlobalQueue API 地址"
+        help="GlobalQueue API address"
     )
 ):
     """
-    从配置文件加载 TaskInstance 列表
+    Load TaskInstance list from configuration file
 
-    示例:
+    Example:
         globalqueue load-config task_instances.yaml
     """
     try:
@@ -181,13 +181,13 @@ def load_config(
         response.raise_for_status()
 
         data = response.json()
-        typer.echo(f"成功: {data['message']}")
+        typer.echo(f"Success: {data['message']}")
 
     except requests.exceptions.ConnectionError:
-        typer.echo(f"错误: 无法连接到 {api_url}", err=True)
+        typer.echo(f"Error: Cannot connect to {api_url}", err=True)
         sys.exit(1)
     except Exception as e:
-        typer.echo(f"加载配置失败: {e}", err=True)
+        typer.echo(f"Failed to load config: {e}", err=True)
         sys.exit(1)
 
 
@@ -197,13 +197,13 @@ def update_queues(
         "http://localhost:8102",
         "--api-url",
         "-u",
-        help="GlobalQueue API 地址"
+        help="GlobalQueue API address"
     )
 ):
     """
-    更新所有队列的状态信息
+    Update status information for all queues
 
-    示例:
+    Example:
         globalqueue update-queues
     """
     try:
@@ -211,14 +211,14 @@ def update_queues(
         response.raise_for_status()
 
         data = response.json()
-        typer.echo(f"成功: {data['message']}")
-        typer.echo(f"更新的队列数: {data['queues_count']}")
+        typer.echo(f"Success: {data['message']}")
+        typer.echo(f"Updated queues: {data['queues_count']}")
 
     except requests.exceptions.ConnectionError:
-        typer.echo(f"错误: 无法连接到 {api_url}", err=True)
+        typer.echo(f"Error: Cannot connect to {api_url}", err=True)
         sys.exit(1)
     except Exception as e:
-        typer.echo(f"更新队列失败: {e}", err=True)
+        typer.echo(f"Failed to update queues: {e}", err=True)
         sys.exit(1)
 
 
