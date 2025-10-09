@@ -72,6 +72,25 @@ async def health():
     """Health check"""
     return {"status": "ok", "service": "GlobalQueue"}
 
+    
+@app.post("/queue/strategy")
+async def set_strategy(strategy: str = Body(...)):
+    """
+    Set the strategy for the GlobalQueue
+    """
+    if global_queue is None:
+        raise HTTPException(status_code=503, detail="GlobalQueue not initialized")
+    
+    if not strategy in ["shortest", "round_robin"]:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    
+    if strategy == "shortest":
+        global_queue.strategy = ShortestQueueStrategy()
+    elif strategy == "round_robin":
+        global_queue.strategy = RoundRobinStrategy()
+
+    return {"message": "Strategy set successfully"}
+
 
 @app.post("/queue/enqueue", response_model=TaskEnqueueResponse)
 async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
@@ -215,7 +234,7 @@ async def get_info():
         total_task_instances=len(task_instances),
         task_instances=task_instances,
         total_models=total_models,
-        active_queues=len(global_queue.queues)
+        active_queues=0  # Strategy-based approach doesn't maintain queue cache
     )
 
 
@@ -251,24 +270,16 @@ async def load_task_instances(config_path: str = Body(..., embed=True)):
 @app.post("/queue/update")
 async def update_queues():
     """
-    Update status information for all queues
+    Update status information for all queues (Deprecated)
+
+    Note: This endpoint is deprecated in the strategy-based implementation.
+    Queue status is now fetched dynamically during task enqueue operations.
 
     Returns:
-        Update result
+        Deprecation notice
     """
-    if global_queue is None:
-        raise HTTPException(status_code=503, detail="GlobalQueue not initialized")
-
-    try:
-        global_queue.update_queues()
-        logger.info(f"Updated {len(global_queue.queues)} queue(s)")
-        return {
-            "message": "Queues updated successfully",
-            "queues_count": len(global_queue.queues)
-        }
-    except Exception as e:
-        logger.error(f"Failed to update queues: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to update queues: {str(e)}"
-        )
+    logger.warning("update_queues endpoint called but is deprecated in strategy-based implementation")
+    return {
+        "message": "This endpoint is deprecated. Queue status is now fetched dynamically during task enqueue.",
+        "queues_count": 0
+    }
