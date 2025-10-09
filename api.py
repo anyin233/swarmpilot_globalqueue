@@ -27,8 +27,9 @@ class TaskEnqueueResponse(BaseModel):
     """Task enqueue response"""
     task_id: str
     model_name: str
-    target_host: str
-    target_port: int
+    target_host: str  # TaskInstance host
+    target_port: int  # TaskInstance port
+    model_port: int  # Model port
     queue_size: int
     message: str
 
@@ -37,8 +38,9 @@ class TaskRoutingInfo(BaseModel):
     """Task routing information"""
     task_id: str
     model_name: str
-    target_host: str
-    target_port: int
+    target_host: str  # TaskInstance host
+    target_port: int  # TaskInstance port
+    model_port: int  # Model port
     timestamp: str
     queue_size: int
 
@@ -138,13 +140,15 @@ async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
             "model_name": routing_info["model_name"],
             "target_host": routing_info["target_host"],
             "target_port": routing_info["target_port"],
+            "model_port": routing_info["model_port"],
             "timestamp": datetime.utcnow().isoformat(),
             "queue_size": response.queue_size
         }
 
         logger.info(
             f"Task {response.task_id} enqueued to {routing_info['model_name']} "
-            f"at {routing_info['target_host']}:{routing_info['target_port']}"
+            f"at TaskInstance {routing_info['target_host']}:{routing_info['target_port']} "
+            f"(model port: {routing_info['model_port']})"
         )
 
         return TaskEnqueueResponse(
@@ -152,6 +156,7 @@ async def enqueue_task(request: TaskEnqueueRequest = Body(...)):
             model_name=routing_info["model_name"],
             target_host=routing_info["target_host"],
             target_port=routing_info["target_port"],
+            model_port=routing_info["model_port"],
             queue_size=response.queue_size,
             message="Task enqueued successfully"
         )

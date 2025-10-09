@@ -105,17 +105,30 @@ class SwarmPilotGlobalMsgQueue:
 
         response = ti_client.enqueue_task(port=selected_q.port, task=task_obj)
 
+        # Parse TaskInstance host and port from base_url
+        # base_url format: "http://host:port" or "https://host:port"
+        import re
+        url_match = re.match(r'https?://([^:]+):(\d+)', ti_host)
+        if url_match:
+            ti_hostname = url_match.group(1)
+            ti_port = int(url_match.group(2))
+        else:
+            # Fallback if URL format is unexpected
+            ti_hostname = ti_host
+            ti_port = 8100  # Default TaskInstance port
+
         # Save routing information
         self.last_routing_info = {
             "model_name": selected_q.model_name,
-            "target_host": ti_host,
-            "target_port": selected_q.port,
+            "target_host": ti_hostname,  # TaskInstance host
+            "target_port": ti_port,  # TaskInstance port
+            "model_port": selected_q.port,  # Model port
             "ti_uuid": str(result.task_instance.uuid)
         }
 
         logger.info(
             f"Task {response.task_id} enqueued to {selected_q.model_name}:{selected_q.port} "
-            f"at {ti_host} (expected: {selected_q.expected_ms}ms, queue_size: {response.queue_size})"
+            f"at TaskInstance {ti_hostname}:{ti_port} (expected: {selected_q.expected_ms}ms, queue_size: {response.queue_size})"
         )
 
         return response
