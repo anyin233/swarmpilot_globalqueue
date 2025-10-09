@@ -252,6 +252,8 @@ class RoundRobinStrategy(BaseStrategy):
         """
         Select the queue in a round-robin manner
         """
-        selected = candidates[self.current_index]
+        # Ensure current_index is within bounds of current candidates list
+        index = self.current_index % len(candidates)
+        selected = candidates[index]
         self.current_index = (self.current_index + 1) % len(candidates)
         return selected
