@@ -34,7 +34,7 @@ class ScheduleTaskRequest(BaseModel):
 
 class SetStrategyRequest(BaseModel):
     """Request to set scheduling strategy"""
-    strategy: str = Field(..., description="Strategy name: 'shortest_queue', 'round_robin', or 'weighted'")
+    strategy: str = Field(..., description="Strategy name: 'shortest_queue', 'round_robin', 'weighted', or 'probabilistic'")
 
 
 class LoadInstancesRequest(BaseModel):
@@ -127,6 +127,7 @@ async def set_strategy(request: SetStrategyRequest) -> Dict[str, str]:
     - shortest_queue: Select instance with shortest expected completion time
     - round_robin: Distribute tasks evenly across instances
     - weighted: Consider both queue length and prediction uncertainty
+    - probabilistic: Probabilistically select based on queue length (shorter queues = higher probability)
     """
     try:
         scheduler.set_strategy(request.strategy)
@@ -148,7 +149,8 @@ async def get_strategy() -> Dict[str, str]:
     name_map = {
         "ShortestQueueStrategy": "shortest_queue",
         "RoundRobinStrategy": "round_robin",
-        "WeightedStrategy": "weighted"
+        "WeightedStrategy": "weighted",
+        "ProbabilisticQueueStrategy": "probabilistic"
     }
 
     return {
@@ -235,7 +237,8 @@ async def get_scheduler_info() -> SchedulerInfo:
     name_map = {
         "ShortestQueueStrategy": "shortest_queue",
         "RoundRobinStrategy": "round_robin",
-        "WeightedStrategy": "weighted"
+        "WeightedStrategy": "weighted",
+        "ProbabilisticQueueStrategy": "probabilistic"
     }
 
     return SchedulerInfo(

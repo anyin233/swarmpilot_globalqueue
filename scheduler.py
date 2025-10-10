@@ -16,6 +16,7 @@ from strategy_refactored import (
     ShortestQueueStrategy,
     RoundRobinStrategy,
     WeightedStrategy,
+    ProbabilisticQueueStrategy,
     TaskInstance,
     SelectionRequest
 )
@@ -79,12 +80,13 @@ class SwarmPilotScheduler:
         Set strategy by name
 
         Args:
-            strategy_name: Name of strategy ("shortest_queue", "round_robin", "weighted")
+            strategy_name: Name of strategy ("shortest_queue", "round_robin", "weighted", "probabilistic")
         """
         strategy_map = {
             "shortest_queue": ShortestQueueStrategy,
             "round_robin": RoundRobinStrategy,
-            "weighted": WeightedStrategy
+            "weighted": WeightedStrategy,
+            "probabilistic": ProbabilisticQueueStrategy
         }
 
         strategy_class = strategy_map.get(strategy_name.lower())

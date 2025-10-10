@@ -14,3 +14,9 @@ dependencies = [
     "typer>=0.15.2",
     "requests>=2.32.3",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+]
