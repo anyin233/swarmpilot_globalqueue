@@ -46,7 +46,7 @@ def start(
 
     # Start FastAPI service
     uvicorn.run(
-        "api:app",
+        "src.scheduler.api:app",
         host=host,
         port=port,
         reload=reload,
