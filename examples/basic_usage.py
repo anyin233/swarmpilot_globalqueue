@@ -9,11 +9,11 @@ from src.scheduler import SwarmPilotScheduler
 from src.scheduler.models import SchedulerRequest
 
 def main():
-    # 1. 创建调度器
+    # 1. Create scheduler
     print("Creating scheduler...")
     scheduler = SwarmPilotScheduler()
 
-    # 2. 加载配置
+    # 2. Load configuration
     print("Loading configuration...")
     try:
         scheduler.load_task_instances_from_config("examples/config_example.yaml")
@@ -23,7 +23,7 @@ def main():
         print("Note: Make sure TaskInstances are running at the configured ports")
         return
 
-    # 3. 提交任务
+    # 3. Submit task
     print("\nSubmitting task...")
     request = SchedulerRequest(
         model_type="test_model",
@@ -36,7 +36,7 @@ def main():
         print(f"✓ Task {response.task_id} scheduled to instance {response.instance_id}")
         print(f"  Model type: {response.model_type}")
 
-        # 4. 查询任务
+        # 4. Query task
         print("\nQuerying task status...")
         task_info = scheduler.task_tracker.get_task_info(response.task_id)
         if task_info:
