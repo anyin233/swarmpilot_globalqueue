@@ -1,0 +1,5 @@
+instances:
+  - host: localhost
+    port: 8100
+  - host: localhost
+    port: 8101
