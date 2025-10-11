@@ -1,27 +1,27 @@
 # Predictor
 
-Predictor负责预测任务的执行时间分布（使用分位数表示），内部维护所有的预测模型，接受外界传入的任务特征信息，返回任务的执行时间分布交由Scheduler用于预测
+Predictor is responsible for predicting task execution time distributions (represented using quantiles). It maintains all prediction models internally, accepts task feature information from external sources, and returns execution time distributions for use by the Scheduler for prediction.
 
-## 接口设计
+## API Design
 
 ### `/train`
 
-训练分位数执行时间预测模型
+Train quantile execution time prediction model
 
-参数设计
+Parameter Design
 ```python
 {
-    "config": File              # 训练配置文件
+    "config": File              # Training configuration file
 }
 ```
 
-config的格式参考项目中其他的训练配置文件
+For config format, refer to other training configuration files in the project
 
-返回格式
+Return Format
 ```python
 {
     "status": str,
-    "model_key": str,           # 该Model Key对应训练出的分位数执行时间预测模型存储的Key
+    "model_key": str,           # Model Key corresponding to the storage key of the trained quantile execution time prediction model
     "metrics": Dict[str, Any],
     "duration_seconds": int
 }
@@ -29,33 +29,33 @@ config的格式参考项目中其他的训练配置文件
 
 ### `/predict/single/{model_type}/{model_name}/{hardware}/{software_name}/{software_version}`
 
-预测单个任务的执行时间分布
+Predict execution time distribution for a single task
 
-路径参数
+Path Parameters
 ```
-model_type: str           # 模型类型
-model_name: str           # 模型名称
-hardware: str             # 硬件配置
-software_name: str        # 软件名称
-software_version: str     # 软件版本
+model_type: str           # Model type
+model_name: str           # Model name
+hardware: str             # Hardware configuration
+software_name: str        # Software name
+software_version: str     # Software version
 ```
 
-`model_type`, `model_name`, `hardware`, `software_name`, `software_version`参数设置模式参见yaml配置文件
+For parameter setting patterns of `model_type`, `model_name`, `hardware`, `software_name`, `software_version`, refer to yaml configuration files
 
-请求体参数
+Request Body Parameters
 ```python
 {
-    "trace": TracePayload,      # 任务trace信息，格式参考项目中的示例trace文件，该接口只接受一个trace项
-    "confidence_level": float,   # 置信度设置,
-    "lookup_table": bool, # （可选）是否使用预置的查询表
-    "lookup_table_name": str # （可选，当lookup_table == True时必选）若希望使用查询表，查询表的文件名
+    "trace": TracePayload,      # Task trace information, format reference example trace files in project, this interface only accepts one trace item
+    "confidence_level": float,   # Confidence level setting,
+    "lookup_table": bool, # (Optional) Whether to use preset lookup table
+    "lookup_table_name": str # (Optional, required when lookup_table == True) If using lookup table, the filename of the lookup table
 }
 ```
 
-说明：
-- lookup table: 实验时使用的可以加快实验实现的速查表，内部存放提前预测完成的结果，具体实现为以一个csv文件保存，输入的feature在前，预测的分位数结果和期望误差在后。
+Notes:
+- lookup table: A lookup table used during experiments to speed up implementation, internally storing pre-computed prediction results, implemented as a CSV file with input features in front columns and predicted quantile results and expected errors in back columns.
 
-返回格式
+Return Format
 ```python
 {
     "summary": {
@@ -77,40 +77,40 @@ software_version: str     # 软件版本
             "software_version": str
         },
         "expect": float,
-        "error": float # 基于分位数分布的理论，计算其期望和误差（误差使用标准差）
+        "error": float # Based on quantile distribution theory, calculate its expectation and error (error uses standard deviation)
     }
 }
 ```
 
 ### `/predict/batch/{model_type}/{model_name}/{hardware}/{software_name}/{software_version}`
 
-批量预测多个任务的执行时间分布
+Batch predict execution time distributions for multiple tasks
 
-路径参数
+Path Parameters
 ```
-model_type: str           # 模型类型
-model_name: str           # 模型名称
-hardware: str             # 硬件配置
-software_name: str        # 软件名称
-software_version: str     # 软件版本
+model_type: str           # Model type
+model_name: str           # Model name
+hardware: str             # Hardware configuration
+software_name: str        # Software name
+software_version: str     # Software version
 ```
 
-`model_type`, `model_name`, `hardware`, `software_name`, `software_version`参数设置模式参见yaml配置文件
+For parameter setting patterns of `model_type`, `model_name`, `hardware`, `software_name`, `software_version`, refer to yaml configuration files
 
-请求体参数
+Request Body Parameters
 ```python
 {
-    "trace": List[TracePayload],  # 任务trace信息列表，格式参考项目中的示例trace文件，接受一组trace
-    "confidence_level": float,     # 置信度设置
-    "lookup_table": bool, # （可选）是否使用预置的查询表
-    "lookup_table_name": str # （可选，当lookup_table == True时必选）若希望使用查询表，查询表的文件名
+    "trace": List[TracePayload],  # List of task trace information, format reference example trace files in project, accepts a group of traces
+    "confidence_level": float,     # Confidence level setting
+    "lookup_table": bool, # (Optional) Whether to use preset lookup table
+    "lookup_table_name": str # (Optional, required when lookup_table == True) If using lookup table, the filename of the lookup table
 }
 ```
 
-说明：
-- lookup table: 实验时使用的可以加快实验实现的速查表，内部存放提前预测完成的结果，具体实现为以一个csv文件保存，输入的feature在前，预测的分位数结果和期望误差在后。
+Notes:
+- lookup table: A lookup table used during experiments to speed up implementation, internally storing pre-computed prediction results, implemented as a CSV file with input features in front columns and predicted quantile results and expected errors in back columns.
 
-返回格式
+Return Format
 ```python
 {
     "summary": {
@@ -132,26 +132,26 @@ software_version: str     # 软件版本
             "software_version": str
         },
         "expect": float,
-        "error": float # 基于分位数分布的理论，计算其期望和误差（误差使用标准差）
+        "error": float # Based on quantile distribution theory, calculate its expectation and error (error uses standard deviation)
     }],
     "expect": float,
-    "error": float # 基于误差累计理论，计算当前所有被预测的任务的总的期望和误差（误差使用标准差）
+    "error": float # Based on error accumulation theory, calculate the total expectation and error for all currently predicted tasks (error uses standard deviation)
 }
 ```
 
 ### `/predict/table/{model_type}/{model_name}/{hardware}/{software_name}/{software_version}`
 
-接口说明：该接口将会生成速查表，同时返回速查表的路径
+Interface Description: This interface will generate a lookup table and return the path to the lookup table
 
-请求体参数
+Request Body Parameters
 ```python
 {
-    "trace_file": upload_file,  # 任务trace信息列表，接受一个有效的trace文件
-    "confidence_level": float,     # 置信度设置
+    "trace_file": upload_file,  # List of task trace information, accepts a valid trace file
+    "confidence_level": float,     # Confidence level setting
 }
 ```
 
-返回格式
+Return Format
 ```python
 {
 	"status": str,  # successful, failed
