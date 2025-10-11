@@ -17,7 +17,9 @@ from .models import (
     QueueInfoResponse, QueueInfoItem,
     TaskQueryResponse,
     TaskCompletionNotification,
-    SchedulerRequest
+    SchedulerRequest,
+    SetStrategyRequest, SetStrategyResponse,
+    PredictModeRequest, PredictModeResponse
 )
 
 # Initialize scheduler
@@ -35,6 +37,83 @@ app = FastAPI(
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "scheduler", "version": "2.0.0"}
+
+
+@app.post("/scheduler/set", response_model=SetStrategyResponse)
+async def set_scheduling_strategy(request: SetStrategyRequest):
+    """
+    Set the scheduling strategy
+
+    Args:
+        request: Strategy setting request containing strategy name
+
+    Returns:
+        Result of strategy setting operation
+    """
+    try:
+        # Validate strategy name
+        valid_strategies = ["shortest_queue", "round_robin", "weighted", "probabilistic"]
+        if request.name not in valid_strategies:
+            return SetStrategyResponse(
+                status="error",
+                message=f"Invalid strategy name '{request.name}'. Valid strategies: {', '.join(valid_strategies)}"
+            )
+
+        # Set strategy
+        scheduler.set_strategy(request.name)
+
+        return SetStrategyResponse(
+            status="success",
+            message="OK"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to set strategy: {e}")
+        return SetStrategyResponse(
+            status="error",
+            message=str(e)
+        )
+
+
+@app.post("/scheduler/predict_mode", response_model=PredictModeResponse)
+async def set_predict_mode(request: PredictModeRequest):
+    """
+    Set the predictor working mode
+
+    Args:
+        request: Predictor mode setting request
+
+    Returns:
+        Result of mode setting operation
+    """
+    try:
+        # Validate mode
+        valid_modes = ["default", "lookup_table"]
+        if request.mode not in valid_modes:
+            return PredictModeResponse(
+                status="error",
+                message=f"Invalid mode '{request.mode}'. Valid modes: {', '.join(valid_modes)}"
+            )
+
+        # TODO: Implement predictor mode switching
+        # This requires either:
+        # 1. Adding a predict_mode property to the scheduler
+        # 2. Passing mode to predictor service calls
+        # 3. Configuring predictor service to use different modes
+
+        logger.warning("Predictor mode switching is not yet fully implemented")
+
+        return PredictModeResponse(
+            status="success",
+            message="OK (mode switching not fully implemented yet)"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to set predictor mode: {e}")
+        return PredictModeResponse(
+            status="error",
+            message=str(e)
+        )
 
 
 @app.post("/ti/register", response_model=TIRegisterResponse)

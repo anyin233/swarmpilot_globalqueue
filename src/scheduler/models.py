@@ -254,8 +254,41 @@ class TaskQueryResponse(BaseModel):
 # ========== Legacy API Models (for compatibility) ==========
 
 class SetStrategyRequest(BaseModel):
-    """Request to set scheduling strategy"""
-    strategy: str = Field(..., description="Strategy name: 'shortest_queue', 'round_robin', 'weighted', or 'probabilistic'")
+    """
+    /scheduler/set - Set scheduling strategy request
+
+    Parameter design from Scheduler.md
+    """
+    name: str = Field(..., description="Scheduling strategy name: 'shortest_queue', 'round_robin', 'weighted', or 'probabilistic'")
+
+
+class SetStrategyResponse(BaseModel):
+    """
+    /scheduler/set - Set scheduling strategy response
+
+    Return format from Scheduler.md
+    """
+    status: str = Field(..., description="'success' indicates strategy set successfully, 'error' indicates failure")
+    message: str = Field(..., description="'OK' if status is success; specific error reason if status is error")
+
+
+class PredictModeRequest(BaseModel):
+    """
+    /scheduler/predict_mode - Set predictor mode request
+
+    Parameter design from Scheduler.md
+    """
+    mode: str = Field(..., description="Prediction mode: 'default' for standard prediction model, 'lookup_table' for pre-computed lookup table")
+
+
+class PredictModeResponse(BaseModel):
+    """
+    /scheduler/predict_mode - Set predictor mode response
+
+    Return format from Scheduler.md
+    """
+    status: str = Field(..., description="'success' indicates mode switch successful, 'error' indicates failure")
+    message: str = Field(..., description="'OK' if status is success; specific error reason if status is error")
 
 
 class LoadInstancesRequest(BaseModel):
