@@ -1,223 +1,223 @@
 # Scheduler
 
-Scheduler负责将任务分发到不同的Task Instance上。Scheduler作为中央调度器，维护所有Task Instance的状态信息，并根据选定的调度策略和队列预测结果，将每个任务路由到最优的Task Instance执行。
+The Scheduler is responsible for distributing tasks to different Task Instances. Acting as a central scheduler, it maintains state information for all Task Instances and routes each task to the optimal Task Instance based on the selected scheduling strategy and queue prediction results.
 
-每个Scheduler内部应当维护的信息包括：
-- 每个Task Instance当前的队列信息（预测信息）：包括预计等待时间的期望值和误差范围
-- 每个Task Instance的连接信息：包括网络地址、端口、健康状态等
-- 每个模型所对应的所有Task Instance：支持多模型调度，每种模型可以有多个Task Instance实例
+Each Scheduler internally maintains:
+- Queue information (prediction info) for each Task Instance: includes expected wait time mean and error range
+- Connection information for each Task Instance: includes network address, port, health status, etc.
+- All Task Instances corresponding to each model: supports multi-model scheduling, each model can have multiple Task Instance replicas
 
-所有的Task Instance使用一个UUID进行唯一标识，确保在分布式环境中的唯一性。
+All Task Instances are uniquely identified by a UUID to ensure uniqueness in distributed environments.
 
-具体来说，数据结构分别为
+Specifically, the data structures are:
 ```python
-ti_queue_info: Dict{UUID: (float, float)}  # UUID -> (期望等待时间, 误差)
-ti_conn_info : Dict{UUID: List[str, Any]}  # UUID -> [连接地址, 其他配置信息]
-model_to_ti  : Dict{str: List[UUID]}       # 模型名称 -> Task Instance UUID列表
+ti_queue_info: Dict{UUID: (float, float)}  # UUID -> (expected wait time, error)
+ti_conn_info : Dict{UUID: List[str, Any]}  # UUID -> [connection address, other config info]
+model_to_ti  : Dict{str: List[UUID]}       # model name -> Task Instance UUID list
 ```
 
-## 接口设计
+## API Design
 
 
 ### `/scheduler/set`
 
-选择并设置调度器使用的调度策略。Scheduler支持多种调度策略，包括最短队列（shortest_queue）、轮询（round_robin）、加权（weighted）、概率性（probabilistic）等。更改策略会立即生效，影响后续所有任务的调度决策。
+Select and set the scheduling strategy used by the Scheduler. The Scheduler supports multiple scheduling strategies, including shortest_queue, round_robin, weighted, and probabilistic. Strategy changes take effect immediately, affecting all subsequent task scheduling decisions.
 
-参数设计
+Parameter Design
 ```python
 {
-    "name": str  # 调度策略名称，如 "shortest_queue", "round_robin", "weighted", "probabilistic"
+    "name": str  # Scheduling strategy name, e.g., "shortest_queue", "round_robin", "weighted", "probabilistic"
 }
 ```
 
-返回格式
+Return Format
 
 ```python
 {
-    "status": str,   # "success" 表示策略设置成功，"error" 表示设置失败
-    "message": str,  # 若status为success，该项为"OK"；若为error，返回具体错误原因（如策略名称不存在）
+    "status": str,   # "success" indicates strategy set successfully, "error" indicates failure
+    "message": str,  # "OK" if status is success; specific error reason if status is error (e.g., strategy name does not exist)
 }
 ```
 
 ### `/scheduler/predict_mode`
 
-选择预测器的工作模式。预测器负责估算任务在各个Task Instance上的执行时间，支持两种工作模式：
+Select the working mode of the predictor. The predictor estimates task execution time on each Task Instance and supports two working modes:
 
-- **标准预测模式（default）**：使用训练好的机器学习模型进行实时预测，精度较高但有一定计算开销
-- **速查表模式（lookup_table）**：使用预先计算好的结果查询表，速度快但灵活性较低
+- **Standard Prediction Mode (default)**: Uses trained machine learning models for real-time prediction, higher accuracy but with some computational overhead
+- **Lookup Table Mode (lookup_table)**: Uses pre-computed lookup tables, faster but less flexible
 
-参数设计
+Parameter Design
 ```python
 {
-    "mode": str,  # 预测模式：
-                  # "default" - 使用标准预测模型进行实时预测
-                  # "lookup_table" - 使用预先计算的速查表快速查询
+    "mode": str,  # Prediction mode:
+                  # "default" - Use standard prediction model for real-time prediction
+                  # "lookup_table" - Use pre-computed lookup table for fast queries
 }
 ```
 
-返回格式
+Return Format
 
 ```python
 {
-    "status": str,   # "success" 表示模式切换成功，"error" 表示切换失败
-    "message": str,  # 若status为success，该项为"OK"；若为error，返回具体错误原因（如不支持的模式类型）
+    "status": str,   # "success" indicates mode switch successful, "error" indicates failure
+    "message": str,  # "OK" if status is success; specific error reason if status is error (e.g., unsupported mode type)
 }
 ```
 
 ### `/ti/register`
 
-将一个Task Instance注册到当前的Scheduler。注册成功后，Scheduler会将该Task Instance纳入调度池，后续提交的任务可能被分配到该实例。注册时会验证Task Instance的可达性和健康状态。
+Register a Task Instance to the current Scheduler. After successful registration, the Scheduler will include the Task Instance in the scheduling pool, and subsequently submitted tasks may be assigned to this instance. Registration will verify the Task Instance's reachability and health status.
 
-参数设计
+Parameter Design
 ```python
 {
-    "host": str,  # Task Instance的主机地址，可以是IP地址（如"192.168.1.100"）或域名（如"worker1.example.com"）
-    "port": int   # Task Instance的HTTP服务端口号，默认通常为8100
+    "host": str,  # Task Instance host address, can be an IP address (e.g., "192.168.1.100") or domain name (e.g., "worker1.example.com")
+    "port": int   # Task Instance HTTP service port number, typically defaults to 8100
 }
 ```
 
-返回格式
+Return Format
 ```python
 {
-    "status": str,    # "success" 表示注册成功，"error" 表示注册失败
-    "message": str,   # 成功时返回描述信息（如"TaskInstance registered successfully"）
-                      # 失败时返回错误原因（如"Connection refused"或"Health check failed"）
-    "ti_uuid": UUID   # 为该Task Instance分配的全局唯一标识符，后续操作需要使用此UUID
-                      # 注册失败时该字段为空字符串
+    "status": str,    # "success" indicates successful registration, "error" indicates failure
+    "message": str,   # Returns description on success (e.g., "TaskInstance registered successfully")
+                      # Returns error reason on failure (e.g., "Connection refused" or "Health check failed")
+    "ti_uuid": UUID   # Globally unique identifier assigned to this Task Instance, required for subsequent operations
+                      # Empty string if registration fails
 }
 ```
 
 ### `/ti/remove`
 
-将一个Task Instance从当前的Scheduler中移除。移除后，该Task Instance不再接收新任务，但已分配给它的进行中任务会继续执行直到完成。移除操作是安全的，不会中断正在执行的任务。
+Remove a Task Instance from the current Scheduler. After removal, the Task Instance will no longer receive new tasks, but tasks already assigned to it will continue executing until completion. The removal operation is safe and will not interrupt running tasks.
 
-参数设计
+Parameter Design
 ```python
 {
-    "ti_uuid": UUID  # 要移除的Task Instance的唯一标识符，该UUID在注册时由Scheduler分配
-                     # 必须是已注册的有效UUID，否则操作失败
+    "ti_uuid": UUID  # Unique identifier of the Task Instance to remove, assigned by Scheduler during registration
+                     # Must be a valid registered UUID, otherwise operation fails
 }
 ```
 
-返回格式
+Return Format
 ```python
 {
-    "status": str,    # "success" 表示移除成功，"error" 表示移除失败
-    "message": str,   # 成功时返回描述信息（如"TaskInstance removed successfully"）
-                      # 失败时返回错误原因（如"TaskInstance not found"或"Invalid UUID format"）
-    "ti_uuid": UUID   # 被移除的Task Instance的UUID，用于确认操作对象
-                      # 若UUID不存在，该字段返回传入的UUID以供调试
+    "status": str,    # "success" indicates successful removal, "error" indicates failure
+    "message": str,   # Returns description on success (e.g., "TaskInstance removed successfully")
+                      # Returns error reason on failure (e.g., "TaskInstance not found" or "Invalid UUID format")
+    "ti_uuid": UUID   # UUID of the removed Task Instance, used to confirm the operation target
+                      # Returns the provided UUID for debugging if UUID does not exist
 }
 ```
 
 ### `/queue/submit`
 
-将一个需要调度的任务提交到当前Scheduler。Scheduler会根据当前的调度策略、各Task Instance的队列状态和预测的执行时间，选择最优的Task Instance执行该任务。提交成功后返回任务ID，可用于后续查询任务状态。
+Submit a task to be scheduled to the current Scheduler. The Scheduler will select the optimal Task Instance to execute the task based on the current scheduling strategy, queue status of each Task Instance, and predicted execution time. Returns a task ID upon successful submission for subsequent status queries.
 
-参数设计
+Parameter Design
 ```python
 {
-    "model_name": str,            # 目标模型名称（如"gpt-3.5-turbo"、"llama-7b"等）
-                                  # Scheduler会在注册了该模型的Task Instance中进行选择
+    "model_name": str,            # Target model name (e.g., "gpt-3.5-turbo", "llama-7b", etc.)
+                                  # Scheduler will select from Task Instances registered with this model
 
-    "task_input": Dict[str, Any], # 提交给Task Instance的任务输入信息
-                                  # 具体格式取决于目标模型的要求
-                                  # 常见字段如：{"prompt": "...", "max_tokens": 100, "temperature": 0.7}
+    "task_input": Dict[str, Any], # Task input information submitted to Task Instance
+                                  # Specific format depends on target model requirements
+                                  # Common fields: {"prompt": "...", "max_tokens": 100, "temperature": 0.7}
 
-    "metadata": Dict[str, Any]    # 提交给Predictor的元数据，用于预测模型执行时间分布
-                                  # 可包含：{"hardware": "A100", "input_tokens": 100, "output_tokens": 50}
-                                  # 更详细的metadata有助于提高预测精度
+    "metadata": Dict[str, Any]    # Metadata submitted to Predictor for predicting model execution time distribution
+                                  # May include: {"hardware": "A100", "input_tokens": 100, "output_tokens": 50}
+                                  # More detailed metadata helps improve prediction accuracy
 }
 ```
 
-返回格式
+Return Format
 ```python
 {
-    "status": str,              # "success" 表示任务成功调度，"error" 表示调度失败
-    "task_id": str,             # 提交的任务的全局唯一标识符，用于后续查询任务状态和结果
-                                # 格式通常为"task-{uuid}"
+    "status": str,              # "success" indicates task successfully scheduled, "error" indicates scheduling failure
+    "task_id": str,             # Globally unique identifier for the submitted task, used for subsequent status and result queries
+                                # Format typically "task-{uuid}"
 
-    "scheduled_ti": UUID,       # 任务被调度到的Task Instance的UUID
-                                # 可用于追踪任务分配情况和负载均衡分析
-                                # 调度失败时该字段可能为空
+    "scheduled_ti": UUID,       # UUID of the Task Instance the task was scheduled to
+                                # Can be used to track task allocation and load balancing analysis
+                                # May be empty if scheduling fails
 }
 ```
 
-**注意事项**：
-- 如果没有注册任何Task Instance，提交会失败
-- 如果指定的model_name没有对应的Task Instance，提交会失败
-- 建议在metadata中提供尽可能详细的信息以提高调度质量
+**Important Notes**:
+- Submission will fail if no Task Instances are registered
+- Submission will fail if the specified model_name has no corresponding Task Instances
+- Recommend providing as much detail as possible in metadata to improve scheduling quality
 
 ### `/queue/info`
 
-获取当前Scheduler上所有Queue的信息。返回每个Task Instance的队列状态，包括预计等待时间的期望值和误差范围。该接口常用于监控系统负载、分析调度效果和做出负载均衡决策。
+Get information about all Queues on the current Scheduler. Returns the queue status of each Task Instance, including expected wait time mean and error range. This interface is commonly used for monitoring system load, analyzing scheduling effectiveness, and making load balancing decisions.
 
-参数设计
+Parameter Design
 ```python
 {
-    "model_name": str  # (可选参数) 指定模型名称，仅返回该模型对应的Task Instance队列信息
-                       # 若不指定（为null或空），则返回所有模型的所有Task Instance的信息
-                       # 用于过滤和聚焦特定模型的负载情况
+    "model_name": str  # (Optional parameter) Specify model name to return only Task Instance queue info for that model
+                       # If not specified (null or empty), returns info for all Task Instances across all models
+                       # Used to filter and focus on specific model load conditions
 }
 ```
 
-返回格式
+Return Format
 ```python
 {
-    "status": str,      # "success" 表示查询成功，"error" 表示查询失败
-    "queues": List[{    # 队列信息列表，每个元素代表一个Task Instance的队列状态
-        "model_name": str,                 # 该Task Instance运行的模型名称
-        "ti_uuid": UUID,                   # Task Instance的唯一标识符
-        "waiting_time_expect": float,      # 预计等待时间的期望值（单位：毫秒）
-                                           # 表示新任务提交到该实例后，预计需要等待多久才能开始执行
-        "waiting_time_error": float,       # 预计等待时间的误差（标准差，单位：毫秒）
-                                           # 表示预测的不确定性范围，值越小表示预测越准确
+    "status": str,      # "success" indicates successful query, "error" indicates failure
+    "queues": List[{    # Queue information list, each element represents a Task Instance's queue status
+        "model_name": str,                 # Model name running on this Task Instance
+        "ti_uuid": UUID,                   # Unique identifier of the Task Instance
+        "waiting_time_expect": float,      # Expected wait time mean (unit: milliseconds)
+                                           # Indicates how long a newly submitted task to this instance is expected to wait before starting execution
+        "waiting_time_error": float,       # Wait time error (standard deviation, unit: milliseconds)
+                                           # Indicates prediction uncertainty range; smaller value means more accurate prediction
     }]
 }
 ```
 
-**使用场景**：
-- 监控面板实时显示各队列负载
-- 客户端主动选择负载较低的队列提交任务
-- 分析系统瓶颈和优化调度策略
+**Use Cases**:
+- Monitoring dashboard displays real-time queue loads
+- Clients proactively select lower-load queues to submit tasks
+- Analyze system bottlenecks and optimize scheduling strategies
 
 ### `/task/query`
 
-查询一个特定Task的调度信息和执行状态。可用于追踪任务的完整生命周期，从提交、调度、执行到完成的全过程。支持轮询方式等待任务完成。
+Query scheduling information and execution status of a specific Task. Can be used to track the complete lifecycle of a task, from submission, scheduling, execution to completion. Supports polling to wait for task completion.
 
-参数设计
+Parameter Design
 ```python
 {
-    "task_id": str  # 任务的全局唯一标识符，在任务提交时由Scheduler返回
-                    # 格式通常为"task-{uuid}"
-                    # 必须是有效的、已提交的任务ID
+    "task_id": str  # Globally unique identifier of the task, returned by Scheduler upon task submission
+                    # Format typically "task-{uuid}"
+                    # Must be a valid, submitted task ID
 }
 ```
 
-返回格式
+Return Format
 ```python
 {
-    "task_id": str,               # 任务ID，与查询参数一致
+    "task_id": str,               # Task ID, consistent with query parameter
 
-    "task_status": str,           # 任务当前状态，可能的值：
-                                  # "queued" - 已提交但尚未调度到Task Instance
-                                  # "scheduled" - 已调度到Task Instance，等待或正在执行
-                                  # "completed" - 执行完成，结果已返回
+    "task_status": str,           # Current task status, possible values:
+                                  # "queued" - Submitted but not yet scheduled to Task Instance
+                                  # "scheduled" - Scheduled to Task Instance, waiting or executing
+                                  # "completed" - Execution complete, result returned
 
-    "scheduled_ti": UUID,         # 任务被调度到的Task Instance的UUID
-                                  # 可用于定位任务执行位置
+    "scheduled_ti": UUID,         # UUID of the Task Instance the task was scheduled to
+                                  # Can be used to locate task execution location
 
-    "submit_time": float,         # 任务提交时间戳（Unix timestamp，精确到毫秒）
-                                  # 可用于计算任务总耗时
+    "submit_time": float,         # Task submission timestamp (Unix timestamp, milliseconds precision)
+                                  # Can be used to calculate total task duration
 
-    "result": Any                 # 任务执行结果（仅在task_status为"completed"时有值）
-                                  # 具体格式取决于任务类型
-                                  # 执行失败时也在此字段返回错误信息
-                                  # 未完成时该字段为null
+    "result": Any                 # Task execution result (only has value when task_status is "completed")
+                                  # Specific format depends on task type
+                                  # Also returns error information in this field on execution failure
+                                  # null when not yet completed
 }
 ```
 
-**使用建议**：
-- 使用轮询方式查询时，建议采用指数退避策略，避免频繁请求
-- 任务完成后，结果可能在一段时间后被清理，建议及时获取
-- 可结合submit_time计算任务的端到端延迟
+**Usage Recommendations**:
+- When polling queries, recommend using exponential backoff strategy to avoid frequent requests
+- After task completion, results may be cleaned up after some time; recommend retrieving promptly
+- Can combine with submit_time to calculate end-to-end task latency
