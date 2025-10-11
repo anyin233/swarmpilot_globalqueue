@@ -81,6 +81,25 @@ def test_add_task_instance():
         mock_client_class.assert_called_once_with("http://localhost:8100")
 
 
+def test_add_task_instance_with_model_name():
+    """Test adding a task instance with model name"""
+    scheduler = SwarmPilotScheduler()
+
+    # Mock the client creation
+    from unittest.mock import patch
+    with patch('src.scheduler.core.TaskInstanceClient') as mock_client_class:
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        ti_uuid = scheduler.add_task_instance("http://localhost:8100", model_name="gpt-3.5")
+
+        assert ti_uuid is not None
+        assert len(scheduler.taskinstances) == 1
+        # Verify the model_type is set on the TaskInstance
+        assert scheduler.taskinstances[0].model_type == "gpt-3.5"
+        mock_client_class.assert_called_once_with("http://localhost:8100")
+
+
 def test_remove_task_instance():
     """Test removing a task instance"""
     scheduler = SwarmPilotScheduler()
@@ -105,6 +124,36 @@ def test_remove_nonexistent_instance():
     result = scheduler.remove_task_instance(fake_uuid)
 
     assert result is False
+
+
+def test_remove_task_instance_by_address():
+    """Test removing a task instance by host and port"""
+    scheduler = SwarmPilotScheduler()
+
+    # Add an instance first
+    from unittest.mock import patch
+    with patch('src.scheduler.core.TaskInstanceClient') as mock_client_class:
+        # Setup mock to have base_url attribute
+        mock_client = Mock()
+        mock_client.base_url = "http://localhost:8100"
+        mock_client_class.return_value = mock_client
+
+        ti_uuid = scheduler.add_task_instance("http://localhost:8100")
+
+        # Remove it by address
+        removed_uuid = scheduler.remove_task_instance_by_address("localhost", 8100)
+
+        assert removed_uuid == ti_uuid
+        assert len(scheduler.taskinstances) == 0
+
+
+def test_remove_task_instance_by_address_not_found():
+    """Test removing non-existent instance by address"""
+    scheduler = SwarmPilotScheduler()
+
+    result = scheduler.remove_task_instance_by_address("nonexistent", 9999)
+
+    assert result is None
 
 
 def test_strategy_switching(scheduler_with_instances):

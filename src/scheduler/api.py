@@ -40,21 +40,21 @@ async def health_check():
 @app.post("/ti/register", response_model=TIRegisterResponse)
 async def register_task_instance(request: TIRegisterRequest):
     """
-    注册一个 Task Instance 到调度器
+    Register a Task Instance to the scheduler
 
     Args:
-        request: 包含 host 和 port 的注册请求
+        request: Registration request containing host, port, and model_name
 
     Returns:
-        注册结果，包含分配的 ti_uuid
+        Registration result with assigned ti_uuid
     """
     try:
         base_url = f"http://{request.host}:{request.port}"
-        ti_uuid = scheduler.add_task_instance(base_url)
+        ti_uuid = scheduler.add_task_instance(base_url, model_name=request.model_name)
 
         return TIRegisterResponse(
             status="success",
-            message=f"TaskInstance registered successfully",
+            message=f"TaskInstance registered successfully for model {request.model_name}",
             ti_uuid=str(ti_uuid)
         )
     except Exception as e:
@@ -69,67 +69,68 @@ async def register_task_instance(request: TIRegisterRequest):
 @app.post("/ti/remove", response_model=TIRemoveResponse)
 async def remove_task_instance(request: TIRemoveRequest):
     """
-    从调度器移除一个 Task Instance
+    Remove a Task Instance from the scheduler
 
     Args:
-        request: 包含 ti_uuid 的移除请求
+        request: Removal request containing host and port
 
     Returns:
-        移除结果
+        Removal result
     """
     try:
-        from uuid import UUID
-        ti_uuid = UUID(request.ti_uuid)
+        # Remove TaskInstance by host and port
+        removed_uuid = scheduler.remove_task_instance_by_address(
+            host=request.host,
+            port=request.port
+        )
 
-        removed = scheduler.remove_task_instance(ti_uuid)
-
-        if not removed:
+        if removed_uuid is None:
             return TIRemoveResponse(
                 status="error",
-                message=f"TaskInstance {request.ti_uuid} not found",
-                ti_uuid=request.ti_uuid
+                message=f"TaskInstance at {request.host}:{request.port} not found",
+                host=request.host,
+                port=request.port,
+                ti_uuid=None
             )
 
         return TIRemoveResponse(
             status="success",
             message=f"TaskInstance removed successfully",
-            ti_uuid=request.ti_uuid
-        )
-    except ValueError:
-        return TIRemoveResponse(
-            status="error",
-            message="Invalid UUID format",
-            ti_uuid=request.ti_uuid
+            host=request.host,
+            port=request.port,
+            ti_uuid=str(removed_uuid)
         )
     except Exception as e:
         logger.error(f"Failed to remove TaskInstance: {e}")
         return TIRemoveResponse(
             status="error",
             message=str(e),
-            ti_uuid=request.ti_uuid
+            host=request.host,
+            port=request.port,
+            ti_uuid=None
         )
 
 
 @app.post("/queue/submit", response_model=QueueSubmitResponse)
 async def submit_task(request: QueueSubmitRequest):
     """
-    提交任务到调度器
+    Submit task to the scheduler
 
     Args:
-        request: 任务提交请求
+        request: Task submission request
 
     Returns:
-        调度结果，包含 task_id 和 scheduled_ti
+        Scheduling result with task_id and scheduled_ti
     """
     try:
-        # 创建调度请求
+        # Create scheduler request
         scheduler_req = SchedulerRequest(
             model_type=request.model_name,
             input_data=request.task_input,
             metadata=request.metadata
         )
 
-        # 执行调度
+        # Execute scheduling
         response = scheduler.schedule(scheduler_req)
 
         return QueueSubmitResponse(
@@ -149,34 +150,34 @@ async def submit_task(request: QueueSubmitRequest):
 @app.get("/queue/info", response_model=QueueInfoResponse)
 async def get_queue_info(model_name: Optional[str] = Query(None)):
     """
-    获取所有队列的信息
+    Get information about all queues
 
     Args:
-        model_name: 可选，过滤特定模型的队列
+        model_name: Optional, filter queues for specific model
 
     Returns:
-        队列信息列表
+        List of queue information
     """
     try:
         queues = []
 
-        # 获取所有实例状态
+        # Get all instance statuses
         statuses = scheduler.get_instance_statuses()
 
         for status in statuses:
-            # 如果指定了 model_name，只返回匹配的
+            # If model_name is specified, only return matching ones
             if model_name and status.get("model_type") != model_name:
                 continue
 
-            # 跳过错误状态的实例
+            # Skip instances with error status
             if status.get("status") == "error":
                 continue
 
             queue_info = QueueInfoItem(
                 model_name=status.get("model_type", "unknown"),
                 ti_uuid=status["uuid"],
-                waiting_time_expect=0.0,  # TODO: 从策略获取
-                waiting_time_error=0.0    # TODO: 从策略获取
+                waiting_time_expect=0.0,  # TODO: Get from strategy
+                waiting_time_error=0.0    # TODO: Get from strategy
             )
             queues.append(queue_info)
 
@@ -191,18 +192,18 @@ async def get_queue_info(model_name: Optional[str] = Query(None)):
 
 
 @app.get("/task/query", response_model=TaskQueryResponse)
-async def query_task(task_id: str = Query(..., description="任务ID")):
+async def query_task(task_id: str = Query(..., description="Task ID")):
     """
-    查询任务状态
+    Query task status
 
     Args:
-        task_id: 任务唯一标识符
+        task_id: Task unique identifier
 
     Returns:
-        任务状态信息
+        Task status information
     """
     try:
-        # 从 TaskTracker 获取任务信息
+        # Get task information from TaskTracker
         task_info = scheduler.task_tracker.get_task_info(task_id)
 
         if not task_info:
@@ -229,16 +230,16 @@ async def query_task(task_id: str = Query(..., description="任务ID")):
 @app.post("/notify/task_complete")
 async def notify_task_completion(notification: TaskCompletionNotification):
     """
-    接收任务完成通知
+    Receive task completion notification
 
     Args:
-        notification: 任务完成通知
+        notification: Task completion notification
 
     Returns:
-        确认响应
+        Confirmation response
     """
     try:
-        # 查找实例 UUID
+        # Find instance UUID
         instance_uuid = None
         for ti in scheduler.taskinstances:
             status = ti.instance.get_status()
@@ -255,7 +256,7 @@ async def notify_task_completion(notification: TaskCompletionNotification):
                 "message": f"Instance {notification.instance_id} not found"
             }
 
-        # 处理完成
+        # Process completion
         total_time = scheduler.handle_task_completion(
             task_id=notification.task_id,
             instance_uuid=instance_uuid,
@@ -279,10 +280,10 @@ async def notify_task_completion(notification: TaskCompletionNotification):
 
 @app.on_event("startup")
 async def startup_event():
-    """初始化调度器"""
+    """Initialize scheduler"""
     logger.info("Starting SwarmPilot Scheduler v2.0...")
 
-    # 加载默认配置
+    # Load default configuration
     default_config = os.environ.get("SCHEDULER_CONFIG_PATH")
     if default_config and os.path.exists(default_config):
         try:

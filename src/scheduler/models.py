@@ -133,118 +133,122 @@ class SchedulerResponse(BaseModel):
 
 class TIRegisterRequest(BaseModel):
     """
-    /ti/register - 注册 Task Instance
+    /ti/register - Register Task Instance
 
-    参数设计来自 Scheduler.md
+    Parameter design from Scheduler.md
     """
-    host: str = Field(..., description="Task Instance的主机地址")
-    port: int = Field(..., description="Task Instance的端口")
+    host: str = Field(..., description="Task Instance host address")
+    port: int = Field(..., description="Task Instance port")
+    model_name: str = Field(..., description="Model name running on this Task Instance, used for queue filtering during scheduling")
 
 
 class TIRegisterResponse(BaseModel):
     """
-    /ti/register - 注册响应
+    /ti/register - Registration response
 
-    返回格式来自 Scheduler.md
+    Return format from Scheduler.md
     """
-    status: str = Field(..., description="success 或 error")
-    message: str = Field(..., description="描述信息")
-    ti_uuid: str = Field(..., description="注册的Task Instance UUID")
+    status: str = Field(..., description="success or error")
+    message: str = Field(..., description="Description message")
+    ti_uuid: str = Field(..., description="Registered Task Instance UUID")
 
 
 class TIRemoveRequest(BaseModel):
     """
-    /ti/remove - 移除 Task Instance
+    /ti/remove - Remove Task Instance
 
-    参数设计来自 Scheduler.md
+    Parameter design from Scheduler.md
     """
-    ti_uuid: str = Field(..., description="要移除的Task Instance的唯一标识符")
+    host: str = Field(..., description="Host address of the Task Instance to remove")
+    port: int = Field(..., description="Port of the Task Instance to remove")
 
 
 class TIRemoveResponse(BaseModel):
     """
-    /ti/remove - 移除响应
+    /ti/remove - Removal response
 
-    返回格式来自 Scheduler.md
+    Return format from Scheduler.md
     """
-    status: str = Field(..., description="success 或 error")
-    message: str = Field(..., description="描述信息")
-    ti_uuid: str = Field(..., description="移除的Task Instance UUID")
+    status: str = Field(..., description="success or error")
+    message: str = Field(..., description="Description message")
+    host: str = Field(..., description="Host address of removed Task Instance")
+    port: int = Field(..., description="Port of removed Task Instance")
+    ti_uuid: Optional[str] = Field(None, description="UUID of removed Task Instance (if found)")
 
 
 class QueueSubmitRequest(BaseModel):
     """
-    /queue/submit - 提交任务到调度器
+    /queue/submit - Submit task to scheduler
 
-    参数设计来自 Scheduler.md
+    Parameter design from Scheduler.md
     """
-    model_name: str = Field(..., description="目标模型名称")
-    task_input: Dict[str, Any] = Field(..., description="提交给Task Instance的任务信息")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="提交给Predictor用于预测模型执行时间分布的元数据")
+    model_name: str = Field(..., description="Target model name")
+    task_input: Dict[str, Any] = Field(..., description="Task information submitted to Task Instance")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata submitted to Predictor for predicting model execution time distribution")
 
 
 class QueueSubmitResponse(BaseModel):
     """
-    /queue/submit - 提交响应
+    /queue/submit - Submission response
 
-    返回格式来自 Scheduler.md
+    Return format from Scheduler.md
     """
-    status: str = Field(..., description="success 或 error")
-    task_id: str = Field(..., description="提交的任务ID")
-    scheduled_ti: str = Field(..., description="被调度到的Task Instance UUID")
+    status: str = Field(..., description="success or error")
+    task_id: str = Field(..., description="Submitted task ID")
+    scheduled_ti: str = Field(..., description="UUID of Task Instance scheduled to")
 
 
 class QueueInfoItem(BaseModel):
     """
-    单个队列信息
+    Single queue information
 
-    用于 /queue/info 响应
+    Used for /queue/info response
     """
-    model_name: str = Field(..., description="模型名称")
+    model_name: str = Field(..., description="Model name")
     ti_uuid: str = Field(..., description="Task Instance UUID")
-    waiting_time_expect: float = Field(..., description="预计等待时间的期望")
-    waiting_time_error: float = Field(..., description="预计等待时间的误差")
+    waiting_time_expect: float = Field(..., description="Expected waiting time (mean)")
+    waiting_time_error: float = Field(..., description="Waiting time error (standard deviation)")
 
 
 class QueueInfoRequest(BaseModel):
     """
-    /queue/info - 获取队列信息请求
+    /queue/info - Get queue information request
 
-    参数设计来自 Scheduler.md
+    Parameter design from Scheduler.md
     """
-    model_name: Optional[str] = Field(None, description="(可选) 指定模型名称，若不指定则返回所有模型的信息")
+    model_name: Optional[str] = Field(None, description="(Optional) Specify model name, if not specified returns information for all models")
 
 
 class QueueInfoResponse(BaseModel):
     """
-    /queue/info - 获取队列信息响应
+    /queue/info - Get queue information response
 
-    返回格式来自 Scheduler.md
+    Return format from Scheduler.md
     """
-    status: str = Field(..., description="success 或 error")
-    queues: List[QueueInfoItem] = Field(..., description="队列信息列表")
+    status: str = Field(..., description="success or error")
+    queues: List[QueueInfoItem] = Field(..., description="List of queue information")
 
 
 class TaskQueryRequest(BaseModel):
     """
-    /task/query - 查询任务信息请求
+    /task/query - Query task information request
 
-    参数设计来自 Scheduler.md
+    Parameter design from Scheduler.md
     """
-    task_id: str = Field(..., description="任务唯一标识符")
+    task_id: str = Field(..., description="Task unique identifier")
 
 
 class TaskQueryResponse(BaseModel):
     """
-    /task/query - 查询任务信息响应
+    /task/query - Query task information response
 
-    返回格式来自 Scheduler.md
+    Return format from Scheduler.md
     """
-    task_id: str = Field(..., description="任务ID")
-    task_status: TaskStatus = Field(..., description="任务状态: queued, scheduled, completed")
-    scheduled_ti: str = Field(..., description="被调度到的Task Instance UUID")
-    submit_time: float = Field(..., description="提交时间戳")
-    result: Optional[Any] = Field(None, description="任务结果(如果已完成)")
+    task_id: str = Field(..., description="Task ID")
+    task_status: TaskStatus = Field(..., description="Task status: queued, scheduled, completed")
+    scheduled_ti: str = Field(..., description="UUID of Task Instance scheduled to")
+    submit_time: float = Field(..., description="Submission timestamp")
+    result: Optional[Any] = Field(None, description="Task result (if completed)")
 
 
 # ========== Legacy API Models (for compatibility) ==========
@@ -294,3 +298,82 @@ class TaskCompletionNotification(BaseModel):
     task_id: str = Field(..., description="ID of the completed task")
     instance_id: str = Field(..., description="ID of the TaskInstance that completed the task")
     execution_time: float = Field(..., description="Actual execution time in milliseconds")
+
+
+# ========== Predictor Service Models ==========
+
+class PredictorRequest(BaseModel):
+    """
+    Request to Predictor service for execution time prediction
+
+    The Predictor service analyzes the model type and metadata to predict
+    the expected execution time distribution for a task.
+    """
+    model_type: str = Field(..., description="Model type identifier (e.g., 'gpt-3.5-turbo', 'llama-7b')")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="""Task metadata for prediction, may include:
+        - model_name: Specific model variant
+        - hardware: Hardware identifier (e.g., 'A100', 'V100')
+        - software_name: Framework name (e.g., 'vllm', 'pytorch')
+        - software_version: Framework version
+        - input_tokens: Estimated input token count
+        - output_tokens: Estimated output token count
+        - batch_size: Batch size if applicable
+        - Any other domain-specific features
+        """
+    )
+
+
+class PredictorResponse(BaseModel):
+    """
+    Response from Predictor service with execution time prediction
+
+    Provides quantile-based predictions for execution time distribution.
+    """
+    status: str = Field(..., description="'success' or 'error'")
+    message: Optional[str] = Field(None, description="Error message if status is 'error'")
+
+    # Prediction results (only present when status == 'success')
+    model_type: Optional[str] = Field(None, description="Model type that was predicted")
+    quantiles: Optional[List[float]] = Field(
+        None,
+        description="List of quantile values (e.g., [0.1, 0.25, 0.5, 0.75, 0.9])"
+    )
+    quantile_predictions: Optional[List[float]] = Field(
+        None,
+        description="Predicted execution times in milliseconds for each quantile"
+    )
+
+    # Additional metadata
+    prediction_method: Optional[str] = Field(
+        None,
+        description="Method used for prediction (e.g., 'lookup', 'model', 'fallback')"
+    )
+    confidence: Optional[float] = Field(
+        None,
+        description="Confidence score for the prediction (0-1)"
+    )
+
+
+class PredictorHealthResponse(BaseModel):
+    """Health check response from Predictor service"""
+    status: str = Field(..., description="'healthy' or 'unhealthy'")
+    service: str = Field(default="predictor", description="Service identifier")
+    version: Optional[str] = Field(None, description="Service version")
+    total_models: Optional[int] = Field(None, description="Number of models available for prediction")
+
+
+class PredictorModelInfo(BaseModel):
+    """Information about a model available in Predictor"""
+    model_type: str = Field(..., description="Model type identifier")
+    model_name: Optional[str] = Field(None, description="Human-readable model name")
+    total_predictions: int = Field(..., description="Number of prediction records available")
+    hardware_types: List[str] = Field(default_factory=list, description="List of hardware types supported")
+    software_versions: List[str] = Field(default_factory=list, description="List of software versions supported")
+
+
+class PredictorModelsResponse(BaseModel):
+    """Response listing all available models in Predictor"""
+    status: str = Field(..., description="'success' or 'error'")
+    models: List[PredictorModelInfo] = Field(default_factory=list, description="List of available models")

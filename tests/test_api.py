@@ -48,7 +48,8 @@ def test_register_task_instance_success(client, reset_scheduler):
     with patch('src.scheduler.core.TaskInstanceClient'):
         response = client.post("/ti/register", json={
             "host": "localhost",
-            "port": 8100
+            "port": 8100,
+            "model_name": "test_model"
         })
 
         assert response.status_code == 200
@@ -63,7 +64,8 @@ def test_register_task_instance_error(client, reset_scheduler):
     with patch('src.scheduler.core.TaskInstanceClient', side_effect=Exception("Connection failed")):
         response = client.post("/ti/register", json={
             "host": "invalid_host",
-            "port": 8100
+            "port": 8100,
+            "model_name": "test_model"
         })
 
         assert response.status_code == 200  # API returns 200 with error status
@@ -75,48 +77,46 @@ def test_register_task_instance_error(client, reset_scheduler):
 def test_remove_task_instance_success(client, reset_scheduler):
     """Test successful task instance removal"""
     # First register an instance
-    with patch('src.scheduler.core.TaskInstanceClient'):
+    with patch('src.scheduler.core.TaskInstanceClient') as mock_client_class:
+        # Setup mock to have base_url attribute
+        mock_client = Mock()
+        mock_client.base_url = "http://localhost:8100"
+        mock_client_class.return_value = mock_client
+
         reg_response = client.post("/ti/register", json={
             "host": "localhost",
-            "port": 8100
+            "port": 8100,
+            "model_name": "test_model"
         })
-        ti_uuid = reg_response.json()["ti_uuid"]
+        assert reg_response.json()["status"] == "success"
 
-        # Now remove it
+        # Now remove it using host and port
         response = client.post("/ti/remove", json={
-            "ti_uuid": ti_uuid
+            "host": "localhost",
+            "port": 8100
         })
 
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
-        assert data["ti_uuid"] == ti_uuid
+        assert data["host"] == "localhost"
+        assert data["port"] == 8100
+        assert data["ti_uuid"] is not None
 
 
 def test_remove_task_instance_not_found(client, reset_scheduler):
     """Test removing non-existent task instance"""
-    fake_uuid = str(uuid4())
-
     response = client.post("/ti/remove", json={
-        "ti_uuid": fake_uuid
+        "host": "nonexistent",
+        "port": 9999
     })
 
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "error"
     assert "not found" in data["message"]
-
-
-def test_remove_task_instance_invalid_uuid(client, reset_scheduler):
-    """Test removing with invalid UUID format"""
-    response = client.post("/ti/remove", json={
-        "ti_uuid": "invalid-uuid"
-    })
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "error"
-    assert "Invalid UUID format" in data["message"]
+    assert data["host"] == "nonexistent"
+    assert data["port"] == 9999
 
 
 def test_submit_task_success(client, reset_scheduler, mock_task_instance):
@@ -277,6 +277,7 @@ def test_api_workflow_integration(client, reset_scheduler):
 
     with patch('src.scheduler.core.TaskInstanceClient') as mock_client_class:
         mock_client = Mock()
+        mock_client.base_url = "http://localhost:8100"  # Add base_url for removal test
         mock_client.get_status.return_value = InstanceStatusResponse(
             instance_id="test-instance",
             model_type="test_model",
@@ -289,7 +290,8 @@ def test_api_workflow_integration(client, reset_scheduler):
         # 1. Register an instance
         reg_response = client.post("/ti/register", json={
             "host": "localhost",
-            "port": 8100
+            "port": 8100,
+            "model_name": "test_model"
         })
         assert reg_response.status_code == 200
 
@@ -297,10 +299,10 @@ def test_api_workflow_integration(client, reset_scheduler):
         queue_response = client.get("/queue/info")
         assert queue_response.status_code == 200
 
-        # 3. Remove the instance
-        ti_uuid = reg_response.json()["ti_uuid"]
+        # 3. Remove the instance using host and port
         remove_response = client.post("/ti/remove", json={
-            "ti_uuid": ti_uuid
+            "host": "localhost",
+            "port": 8100
         })
         assert remove_response.status_code == 200
         assert remove_response.json()["status"] == "success"

@@ -30,6 +30,7 @@ from .core import SwarmPilotScheduler
 from .task_tracker import TaskTracker, TaskInfo
 from .client import TaskInstanceClient
 from .predictor import LookupPredictor
+from .predictor_client import PredictorClient
 from .models import (
     # Enums
     InstanceStatus,
@@ -48,6 +49,11 @@ from .models import (
     QueueInfoResponse,
     TaskQueryRequest,
     TaskQueryResponse,
+    # Predictor Models
+    PredictorRequest,
+    PredictorResponse,
+    PredictorHealthResponse,
+    PredictorModelsResponse,
 )
 
 # Import strategies for convenience
@@ -70,6 +76,7 @@ __all__ = [
     "TaskInfo",
     "TaskInstanceClient",
     "LookupPredictor",
+    "PredictorClient",
     # Enums
     "InstanceStatus",
     "TaskStatus",
@@ -86,6 +93,11 @@ __all__ = [
     "QueueInfoResponse",
     "TaskQueryRequest",
     "TaskQueryResponse",
+    # Predictor Models
+    "PredictorRequest",
+    "PredictorResponse",
+    "PredictorHealthResponse",
+    "PredictorModelsResponse",
     # Strategies
     "BaseStrategy",
     "ShortestQueueStrategy",

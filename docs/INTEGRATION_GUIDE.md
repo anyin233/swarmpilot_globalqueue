@@ -73,7 +73,8 @@ curl -X POST http://localhost:8102/ti/register \
   -H "Content-Type: application/json" \
   -d '{
     "host": "worker1.example.com",
-    "port": 8100
+    "port": 8100,
+    "model_name": "gpt-3.5-turbo"
   }'
 ```
 
@@ -146,8 +147,9 @@ All endpoints return JSON responses.
 **Request Body**:
 ```json
 {
-  "host": "string",  // TaskInstance hostname or IP
-  "port": integer    // TaskInstance port number
+  "host": "string",       // TaskInstance hostname or IP
+  "port": integer,        // TaskInstance port number
+  "model_name": "string"  // Model name that this instance runs (for queue filtering)
 }
 ```
 
@@ -155,7 +157,8 @@ All endpoints return JSON responses.
 ```json
 {
   "host": "192.168.1.100",
-  "port": 8100
+  "port": 8100,
+  "model_name": "gpt-3.5-turbo"
 }
 ```
 
@@ -163,7 +166,7 @@ All endpoints return JSON responses.
 ```json
 {
   "status": "success",
-  "message": "TaskInstance registered successfully",
+  "message": "TaskInstance registered successfully for model gpt-3.5-turbo",
   "ti_uuid": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
@@ -186,19 +189,21 @@ All endpoints return JSON responses.
 
 **Endpoint**: `POST /ti/remove`
 
-**Description**: Remove a TaskInstance from the scheduler.
+**Description**: Remove a TaskInstance from the scheduler by host and port.
 
 **Request Body**:
 ```json
 {
-  "ti_uuid": "string"  // UUID of the TaskInstance to remove
+  "host": "string",  // Host address of the TaskInstance to remove
+  "port": integer    // Port number of the TaskInstance to remove
 }
 ```
 
 **Example**:
 ```json
 {
-  "ti_uuid": "550e8400-e29b-41d4-a716-446655440000"
+  "host": "192.168.1.100",
+  "port": 8100
 }
 ```
 
@@ -207,6 +212,8 @@ All endpoints return JSON responses.
 {
   "status": "success",
   "message": "TaskInstance removed successfully",
+  "host": "192.168.1.100",
+  "port": 8100,
   "ti_uuid": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
@@ -215,8 +222,10 @@ All endpoints return JSON responses.
 ```json
 {
   "status": "error",
-  "message": "TaskInstance not found",
-  "ti_uuid": "550e8400-e29b-41d4-a716-446655440000"
+  "message": "TaskInstance at 192.168.1.100:8100 not found",
+  "host": "192.168.1.100",
+  "port": 8100,
+  "ti_uuid": null
 }
 ```
 
@@ -493,11 +502,11 @@ class SchedulerClient:
         self.base_url = base_url
         self.instances = {}
 
-    def register_instance(self, host, port):
+    def register_instance(self, host, port, model_name):
         """Register a new TaskInstance"""
         response = requests.post(
             f"{self.base_url}/ti/register",
-            json={"host": host, "port": port}
+            json={"host": host, "port": port, "model_name": model_name}
         )
         data = response.json()
         if data["status"] == "success":
@@ -505,14 +514,17 @@ class SchedulerClient:
             return data["ti_uuid"]
         return None
 
-    def remove_instance(self, ti_uuid):
-        """Remove a TaskInstance"""
+    def remove_instance(self, host, port):
+        """Remove a TaskInstance by host and port"""
         response = requests.post(
             f"{self.base_url}/ti/remove",
-            json={"ti_uuid": ti_uuid}
+            json={"host": host, "port": port}
         )
-        if response.json()["status"] == "success":
-            self.instances.pop(ti_uuid, None)
+        data = response.json()
+        if data["status"] == "success":
+            # Remove from local tracking using returned UUID
+            if data.get("ti_uuid"):
+                self.instances.pop(data["ti_uuid"], None)
             return True
         return False
 ```
@@ -746,21 +758,33 @@ class InstanceManager:
             try:
                 response = requests.post(
                     f"{self.scheduler_url}/ti/register",
-                    json={"host": instance["host"], "port": instance["port"]},
+                    json={
+                        "host": instance["host"],
+                        "port": instance["port"],
+                        "model_name": instance["model_name"]
+                    },
                     timeout=10
                 )
                 data = response.json()
                 if data["status"] == "success":
-                    self.registered_instances.append(data["ti_uuid"])
+                    # Store both UUID and address for removal
+                    self.registered_instances.append({
+                        "ti_uuid": data["ti_uuid"],
+                        "host": instance["host"],
+                        "port": instance["port"]
+                    })
             except Exception as e:
                 print(f"Failed to register {instance}: {e}")
 
     def cleanup(self):
-        for ti_uuid in self.registered_instances:
+        for instance in self.registered_instances:
             try:
                 requests.post(
                     f"{self.scheduler_url}/ti/remove",
-                    json={"ti_uuid": ti_uuid},
+                    json={
+                        "host": instance["host"],
+                        "port": instance["port"]
+                    },
                     timeout=5
                 )
             except:
@@ -823,12 +847,12 @@ class SwarmPilotClient:
         except:
             return False
 
-    def register_instance(self, host: str, port: int) -> Optional[str]:
+    def register_instance(self, host: str, port: int, model_name: str) -> Optional[str]:
         """Register a TaskInstance"""
         try:
             response = requests.post(
                 f"{self.base_url}/ti/register",
-                json={"host": host, "port": port},
+                json={"host": host, "port": port, "model_name": model_name},
                 timeout=self.timeout
             )
             data = response.json()
@@ -935,7 +959,7 @@ if __name__ == "__main__":
         exit(1)
 
     # Register instances (if needed)
-    ti_uuid = client.register_instance("localhost", 8100)
+    ti_uuid = client.register_instance("localhost", 8100, "gpt-3.5-turbo")
     if ti_uuid:
         print(f"Registered instance: {ti_uuid}")
 

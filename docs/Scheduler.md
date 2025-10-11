@@ -23,7 +23,8 @@ model_to_ti  : Dict{str: List[UUID]}
 ```python
 {
     "host": str,            # Task Instance的主机地址
-    "port": int             # Task Instance的端口
+    "port": int,            # Task Instance的端口
+    "model_name": str       # Task Instance运行的模型名称，用于调度时的队列筛选
 }
 ```
 
@@ -43,7 +44,8 @@ model_to_ti  : Dict{str: List[UUID]}
 参数设计
 ```python
 {
-    "ti_uuid": UUID     # 要移除的Task Instance的唯一标识符
+    "host": str,        # 要移除的Task Instance的主机地址
+    "port": int         # 要移除的Task Instance的端口
 }
 ```
 
@@ -52,7 +54,9 @@ model_to_ti  : Dict{str: List[UUID]}
 {
     "status": str,      # "success" 或 "error"
     "message": str,     # 描述信息
-    "ti_uuid": UUID     # 移除的Task Instance UUID
+    "host": str,        # 移除的Task Instance主机地址
+    "port": int,        # 移除的Task Instance端口
+    "ti_uuid": str      # 移除的Task Instance UUID（如果找到）
 }
 ```
 

@@ -124,22 +124,31 @@ class SwarmPilotScheduler:
 
         logger.info(f"Loaded {len(self.taskinstances)} TaskInstance(s)")
 
-    def add_task_instance(self, base_url: str) -> UUID:
-        """Add a single TaskInstance"""
+    def add_task_instance(self, base_url: str, model_name: Optional[str] = None) -> UUID:
+        """
+        Add a single TaskInstance
+
+        Args:
+            base_url: TaskInstance URL
+            model_name: Model name that this instance runs (optional, for filtering)
+
+        Returns:
+            UUID of the registered instance
+        """
         ti_uuid = uuid4()
         client = TaskInstanceClient(base_url)
-        task_instance = TaskInstance(uuid=ti_uuid, instance=client)
+        task_instance = TaskInstance(uuid=ti_uuid, instance=client, model_type=model_name)
 
         self.taskinstances.append(task_instance)
 
         if self._strategy:
             self._strategy.taskinstances = self.taskinstances
 
-        logger.info(f"Added TaskInstance {ti_uuid} at {base_url}")
+        logger.info(f"Added TaskInstance {ti_uuid} at {base_url} for model {model_name}")
         return ti_uuid
 
     def remove_task_instance(self, instance_uuid: UUID) -> bool:
-        """Remove a TaskInstance"""
+        """Remove a TaskInstance by UUID"""
         for i, ti in enumerate(self.taskinstances):
             if ti.uuid == instance_uuid:
                 self.taskinstances.pop(i)
@@ -148,6 +157,34 @@ class SwarmPilotScheduler:
 
         logger.warning(f"TaskInstance {instance_uuid} not found")
         return False
+
+    def remove_task_instance_by_address(self, host: str, port: int) -> Optional[UUID]:
+        """
+        Remove a TaskInstance by host and port
+
+        Args:
+            host: TaskInstance host address
+            port: TaskInstance port number
+
+        Returns:
+            UUID of the removed instance, or None if not found
+        """
+        target_url = f"http://{host}:{port}"
+
+        for i, ti in enumerate(self.taskinstances):
+            # Compare base_url with target URL
+            if ti.instance.base_url == target_url:
+                removed_ti = self.taskinstances.pop(i)
+
+                # Update strategy's taskinstances reference
+                if self._strategy:
+                    self._strategy.taskinstances = self.taskinstances
+
+                logger.info(f"Removed TaskInstance {removed_ti.uuid} at {target_url}")
+                return removed_ti.uuid
+
+        logger.warning(f"TaskInstance at {target_url} not found")
+        return None
 
     def schedule(self, request: SchedulerRequest) -> SchedulerResponse:
         """
