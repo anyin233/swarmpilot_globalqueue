@@ -27,12 +27,12 @@ from src.scheduler.models import (
 
 @pytest.fixture
 def mock_task_instance():
-    """创建一个 mock TaskInstance"""
+    """Create a mock TaskInstance"""
     ti_uuid = uuid4()
     mock_client = Mock(spec=TaskInstanceClient)
     mock_client.base_url = "http://localhost:8100"
 
-    # 默认状态响应
+    # Default status response
     mock_client.get_status.return_value = InstanceStatusResponse(
         instance_id="test-instance-1",
         model_type="test_model",
@@ -41,14 +41,14 @@ def mock_task_instance():
         status="running"
     )
 
-    # 默认预测响应
+    # Default prediction response
     mock_client.predict_queue.return_value = PredictResponse(
         expected_ms=100.0,
         error_ms=10.0,
         queue_size=0
     )
 
-    # 默认入队响应
+    # Default enqueue response
     mock_client.enqueue_task.return_value = EnqueueResponse(
         task_id="task-123",
         queue_size=1,
@@ -62,7 +62,7 @@ def mock_task_instance():
 
 @pytest.fixture
 def scheduler_with_instances(mock_task_instance):
-    """创建一个带有 mock 实例的调度器"""
+    """Create a scheduler with mock instances"""
     from src.scheduler import SwarmPilotScheduler
 
     scheduler = SwarmPilotScheduler()
