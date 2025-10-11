@@ -136,26 +136,13 @@ class PredictorClient:
         )
 
         try:
-            # TODO: Replace with actual Predictor service call
-            # For now, return a placeholder response indicating the service is not implemented
-            logger.warning(
-                f"PredictorClient.predict() called but service not implemented. "
-                f"model_type={model_type}, metadata_keys={list((metadata or {}).keys())}"
+            # Call Predictor service
+            response = self.client.post(
+                f"{self.base_url}/predict",
+                json=request_data.model_dump()
             )
-
-            # Return error response indicating service needs to be implemented
-            return PredictorResponse(
-                status="error",
-                message="Predictor service not implemented. This is a placeholder response."
-            )
-
-            # Actual implementation should be:
-            # response = self.client.post(
-            #     f"{self.base_url}/predict",
-            #     json=request_data.model_dump()
-            # )
-            # response.raise_for_status()
-            # return PredictorResponse(**response.json())
+            response.raise_for_status()
+            return PredictorResponse(**response.json())
 
         except httpx.HTTPError as e:
             logger.error(f"Predictor request failed: {e}")
@@ -192,18 +179,10 @@ class PredictorClient:
               }
         """
         try:
-            # TODO: Replace with actual health check call
-            logger.warning("PredictorClient.health_check() called but service not implemented")
-
-            return PredictorHealthResponse(
-                status="unhealthy",
-                service="predictor"
-            )
-
-            # Actual implementation:
-            # response = self.client.get(f"{self.base_url}/health")
-            # response.raise_for_status()
-            # return PredictorHealthResponse(**response.json())
+            # Call health check endpoint
+            response = self.client.get(f"{self.base_url}/health")
+            response.raise_for_status()
+            return PredictorHealthResponse(**response.json())
 
         except httpx.HTTPError as e:
             logger.error(f"Predictor health check failed: {e}")
@@ -236,18 +215,10 @@ class PredictorClient:
               }
         """
         try:
-            # TODO: Replace with actual models listing call
-            logger.warning("PredictorClient.get_available_models() called but service not implemented")
-
-            return PredictorModelsResponse(
-                status="error",
-                models=[]
-            )
-
-            # Actual implementation:
-            # response = self.client.get(f"{self.base_url}/models")
-            # response.raise_for_status()
-            # return PredictorModelsResponse(**response.json())
+            # Call models listing endpoint
+            response = self.client.get(f"{self.base_url}/models")
+            response.raise_for_status()
+            return PredictorModelsResponse(**response.json())
 
         except httpx.HTTPError as e:
             logger.error(f"Failed to get available models: {e}")

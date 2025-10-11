@@ -410,3 +410,120 @@ class PredictorModelsResponse(BaseModel):
     """Response listing all available models in Predictor"""
     status: str = Field(..., description="'success' or 'error'")
     models: List[PredictorModelInfo] = Field(default_factory=list, description="List of available models")
+
+
+# ========== Predictor Service API Models (Predictor.md specification) ==========
+
+class TrainRequest(BaseModel):
+    """
+    /train - Train quantile execution time prediction model
+
+    Parameter design from Predictor.md
+    """
+    config: Any = Field(..., description="Training configuration file content")
+
+
+class TrainResponse(BaseModel):
+    """
+    /train - Training response
+
+    Return format from Predictor.md
+    """
+    status: str = Field(..., description="'success' or 'error'")
+    model_key: Optional[str] = Field(None, description="Model key corresponding to storage key of trained model")
+    metrics: Optional[Dict[str, Any]] = Field(None, description="Training metrics")
+    duration_seconds: Optional[int] = Field(None, description="Training duration in seconds")
+
+
+class PredictSingleRequest(BaseModel):
+    """
+    /predict/single - Predict execution time for single task
+
+    Request body parameters from Predictor.md
+    """
+    trace: Any = Field(..., description="Task trace information, only accepts one trace item")
+    confidence_level: float = Field(..., description="Confidence level setting")
+    lookup_table: Optional[bool] = Field(False, description="Whether to use preset lookup table")
+    lookup_table_name: Optional[str] = Field(None, description="If using lookup table, the filename of the lookup table")
+
+
+class ModelInfo(BaseModel):
+    """Model information in prediction result"""
+    type: str = Field(..., description="Model type")
+    name: str = Field(..., description="Model name")
+    hardware: str = Field(..., description="Hardware configuration")
+    software_name: str = Field(..., description="Software name")
+    software_version: str = Field(..., description="Software version")
+
+
+class PredictionSummary(BaseModel):
+    """Summary information for prediction"""
+    total: int = Field(..., description="Total number of predictions")
+    success: int = Field(..., description="Number of successful predictions")
+    failed: int = Field(..., description="Number of failed predictions")
+    confidence_level: float = Field(..., description="Confidence level")
+    duration_seconds: int = Field(..., description="Duration in seconds")
+
+
+class PredictionResult(BaseModel):
+    """Single prediction result"""
+    status: str = Field(..., description="'success' or 'error'")
+    quantile_predictions: Optional[List[float]] = Field(None, description="Predicted execution times for each quantile")
+    quantiles: Optional[List[float]] = Field(None, description="List of quantile values")
+    model_info: Optional[ModelInfo] = Field(None, description="Model information")
+    expect: Optional[float] = Field(None, description="Expected execution time (mean)")
+    error: Optional[float] = Field(None, description="Error (standard deviation)")
+
+
+class PredictSingleResponse(BaseModel):
+    """
+    /predict/single - Single prediction response
+
+    Return format from Predictor.md
+    """
+    summary: PredictionSummary = Field(..., description="Prediction summary")
+    results: PredictionResult = Field(..., description="Prediction result")
+
+
+class PredictBatchRequest(BaseModel):
+    """
+    /predict/batch - Predict execution time for multiple tasks
+
+    Request body parameters from Predictor.md
+    """
+    trace: List[Any] = Field(..., description="List of task trace information")
+    confidence_level: float = Field(..., description="Confidence level setting")
+    lookup_table: Optional[bool] = Field(False, description="Whether to use preset lookup table")
+    lookup_table_name: Optional[str] = Field(None, description="If using lookup table, the filename of the lookup table")
+
+
+class PredictBatchResponse(BaseModel):
+    """
+    /predict/batch - Batch prediction response
+
+    Return format from Predictor.md
+    """
+    summary: PredictionSummary = Field(..., description="Prediction summary")
+    results: List[PredictionResult] = Field(..., description="List of prediction results")
+    expect: float = Field(..., description="Total expectation for all predicted tasks")
+    error: float = Field(..., description="Total error (standard deviation) for all predicted tasks")
+
+
+class PredictTableRequest(BaseModel):
+    """
+    /predict/table - Generate lookup table
+
+    Request body parameters from Predictor.md
+    """
+    trace_file: Any = Field(..., description="Task trace file")
+    confidence_level: float = Field(..., description="Confidence level setting")
+
+
+class PredictTableResponse(BaseModel):
+    """
+    /predict/table - Generate lookup table response
+
+    Return format from Predictor.md
+    """
+    status: str = Field(..., description="'successful' or 'failed'")
+    path: Optional[str] = Field(None, description="Path to generated lookup table")
