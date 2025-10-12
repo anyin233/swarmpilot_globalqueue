@@ -333,6 +333,26 @@ class TaskCompletionNotification(BaseModel):
     execution_time: float = Field(..., description="Actual execution time in milliseconds")
 
 
+class ResultSubmitRequest(BaseModel):
+    """
+    Request to submit task result from TaskInstance to Scheduler
+
+    Sent by TaskInstance when a task completes, containing the execution result
+    and metadata for tracking and analysis.
+    """
+    task_id: str = Field(..., description="Task ID")
+    instance_id: str = Field(..., description="TaskInstance ID that executed the task")
+    execution_time: float = Field(..., description="Execution time in milliseconds")
+    result: Dict[str, Any] = Field(..., description="Task execution result")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+
+
+class ResultSubmitResponse(BaseModel):
+    """Response from /result/submit endpoint"""
+    status: str = Field(..., description="'success' or 'error'")
+    message: str = Field(..., description="Response message")
+
+
 # ========== Predictor Service Models ==========
 
 class PredictorRequest(BaseModel):
@@ -432,7 +452,7 @@ class TrainResponse(BaseModel):
     status: str = Field(..., description="'success' or 'error'")
     model_key: Optional[str] = Field(None, description="Model key corresponding to storage key of trained model")
     metrics: Optional[Dict[str, Any]] = Field(None, description="Training metrics")
-    duration_seconds: Optional[int] = Field(None, description="Training duration in seconds")
+    duration_seconds: Optional[float] = Field(None, description="Training duration in seconds")
 
 
 class PredictSingleRequest(BaseModel):
@@ -462,7 +482,7 @@ class PredictionSummary(BaseModel):
     success: int = Field(..., description="Number of successful predictions")
     failed: int = Field(..., description="Number of failed predictions")
     confidence_level: float = Field(..., description="Confidence level")
-    duration_seconds: int = Field(..., description="Duration in seconds")
+    duration_seconds: float = Field(..., description="Duration in seconds")
 
 
 class PredictionResult(BaseModel):

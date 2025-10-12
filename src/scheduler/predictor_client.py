@@ -5,9 +5,23 @@ Client for interacting with the Predictor service to obtain execution time predi
 The Predictor service provides quantile-based predictions for task execution times
 based on model type and task metadata.
 
+API Specification:
+    The Predictor service uses the following endpoint structure:
+    - Single prediction: POST /predict/single/{model_type}/{model_name}/{hardware}/{software_name}/{software_version}
+    - Batch prediction: POST /predict/batch/{model_type}/{model_name}/{hardware}/{software_name}/{software_version}
+    - Health check: GET /health
+
 Usage:
     predictor = PredictorClient(base_url="http://predictor:8200")
-    prediction = predictor.predict("gpt-3.5-turbo", {"input_tokens": 100})
+    response = predictor.predict_single(
+        model_type="llm",
+        model_name="gpt-3.5-turbo",
+        hardware="A100",
+        software_name="vllm",
+        software_version="0.2.0",
+        trace={"input_feature": [{"param_name": "input_tokens", "val": 100}]},
+        confidence_level=0.95
+    )
 """
 
 import httpx
@@ -15,10 +29,11 @@ from typing import Dict, Any, Optional, List
 from loguru import logger
 
 from .models import (
-    PredictorRequest,
-    PredictorResponse,
-    PredictorHealthResponse,
-    PredictorModelsResponse
+    PredictSingleRequest,
+    PredictSingleResponse,
+    PredictBatchRequest,
+    PredictBatchResponse,
+    PredictionResult
 )
 
 
@@ -27,27 +42,32 @@ class PredictorClient:
     Client for Predictor service API
 
     The Predictor service provides execution time predictions based on:
-    - Model type (e.g., 'gpt-3.5-turbo', 'llama-7b')
-    - Task metadata (hardware, software version, input/output size, etc.)
+    - Model type, name, hardware, software configuration
+    - Task trace data (input features, hardware info, etc.)
 
-    The service returns quantile-based predictions that can be used for
-    scheduling decisions and queue time estimation.
+    The service returns quantile-based predictions with expected value and error
+    that can be used for scheduling decisions and queue time estimation.
 
     Args:
-        base_url: Predictor service URL (e.g., "http://predictor-service:8200")
-        timeout: Request timeout in seconds (default: 10.0)
+        base_url: Predictor service URL (e.g., "http://predictor-service:8101")
+        timeout: Request timeout in seconds (default: 30.0)
 
     Example:
-        >>> predictor = PredictorClient("http://localhost:8200")
-        >>> response = predictor.predict(
-        ...     model_type="gpt-3.5-turbo",
-        ...     metadata={"input_tokens": 100, "output_tokens": 50}
+        >>> predictor = PredictorClient("http://localhost:8101")
+        >>> response = predictor.predict_single(
+        ...     model_type="llm",
+        ...     model_name="gpt-3.5-turbo",
+        ...     hardware="A100",
+        ...     software_name="vllm",
+        ...     software_version="0.2.0",
+        ...     trace={"input_feature": [{"param_name": "input_tokens", "val": 100}]},
+        ...     confidence_level=0.95
         ... )
-        >>> if response.status == "success":
-        ...     print(f"Median prediction: {response.quantile_predictions[2]}ms")
+        >>> if response.results.status == "success":
+        ...     print(f"Expected time: {response.results.expect}ms")
     """
 
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(self, base_url: str, timeout: float = 30.0):
         """
         Initialize Predictor client
 
@@ -74,243 +94,116 @@ class PredictorClient:
 
     # ========== Core Prediction API ==========
 
-    def predict(
+    def predict_single(
         self,
         model_type: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> PredictorResponse:
+        model_name: str,
+        hardware: str,
+        software_name: str,
+        software_version: str,
+        trace: Dict[str, Any],
+        confidence_level: float = 0.95,
+        lookup_table: bool = False,
+        lookup_table_name: Optional[str] = None
+    ) -> PredictSingleResponse:
         """
-        Request execution time prediction from Predictor service
-
-        This is the main method for obtaining predictions. The Predictor will
-        analyze the model_type and metadata to provide quantile-based execution
-        time predictions.
+        Request execution time prediction for a single task from Predictor service
 
         Args:
-            model_type: Model identifier (e.g., 'gpt-3.5-turbo', 'llama-7b')
-            metadata: Optional task metadata for more accurate predictions.
-                     Common fields include:
-                     - model_name: Specific model variant
-                     - hardware: Hardware type (e.g., 'A100', 'V100')
-                     - software_name: Framework (e.g., 'vllm', 'pytorch')
-                     - software_version: Framework version
-                     - input_tokens: Estimated input token count
-                     - output_tokens: Estimated output token count
-                     - batch_size: Batch size if applicable
+            model_type: Model type identifier (e.g., 'ocr', 'llm', 'flux')
+            model_name: Model name (e.g., 'gpt-3.5-turbo', 'llama-7b')
+            hardware: Hardware identifier (e.g., 'A100', 'V100', 'cpu')
+            software_name: Framework name (e.g., 'vllm', 'pytorch')
+            software_version: Framework version (e.g., '0.2.0', '2.0.0')
+            trace: Trace object containing task information. Should include:
+                   - input_feature: List of input features, e.g.,
+                     [{"param_name": "input_tokens", "val": 100}]
+                   - hardware_info: Optional hardware info dict
+                   - model_id: Optional model identifier
+                   - duration_ms: Optional actual duration (for training data)
+            confidence_level: Confidence level for prediction (default: 0.95)
+            lookup_table: Whether to use lookup table for faster predictions
+            lookup_table_name: Name of lookup table to use (required if lookup_table=True)
 
         Returns:
-            PredictorResponse: Prediction results with quantiles and predicted times
-
-        Raises:
-            httpx.HTTPError: HTTP request failed
+            PredictSingleResponse: Prediction result with summary and results
 
         Example:
-            >>> response = predictor.predict(
-            ...     "gpt-3.5-turbo",
-            ...     {"hardware": "A100", "input_tokens": 100}
+            >>> response = predictor.predict_single(
+            ...     model_type="llm",
+            ...     model_name="gpt-3.5-turbo",
+            ...     hardware="A100",
+            ...     software_name="vllm",
+            ...     software_version="0.2.0",
+            ...     trace={
+            ...         "input_feature": [
+            ...             {"param_name": "input_tokens", "val": 100},
+            ...             {"param_name": "output_tokens", "val": 50}
+            ...         ]
+            ...     },
+            ...     confidence_level=0.95
             ... )
-            >>> if response.status == "success":
-            ...     median_time = response.quantile_predictions[2]  # Assuming 0.5 quantile is at index 2
-
-        TODO: This method requires a running Predictor service.
-              Implement the actual Predictor service with the following API:
-
-              Endpoint: POST {predictor_base_url}/predict
-              Request Body: {
-                  "model_type": str,
-                  "metadata": dict
-              }
-              Response: {
-                  "status": "success" | "error",
-                  "message": str (optional, for errors),
-                  "model_type": str,
-                  "quantiles": [0.1, 0.25, 0.5, 0.75, 0.9],
-                  "quantile_predictions": [float, ...],
-                  "prediction_method": str,
-                  "confidence": float
-              }
+            >>> if response.results.status == "success":
+            ...     print(f"Expected time: {response.results.expect}ms ± {response.results.error}ms")
         """
-        request_data = PredictorRequest(
-            model_type=model_type,
-            metadata=metadata or {}
+        # Build request body
+        request_body = PredictSingleRequest(
+            trace=trace,
+            confidence_level=confidence_level,
+            lookup_table=lookup_table,
+            lookup_table_name=lookup_table_name
+        )
+
+        # Build URL with path parameters
+        url = (
+            f"{self.base_url}/predict/single/{model_type}/{model_name}/"
+            f"{hardware}/{software_name}/{software_version}"
         )
 
         try:
-            # Call Predictor service
             response = self.client.post(
-                f"{self.base_url}/predict",
-                json=request_data.model_dump()
+                url,
+                json=request_body.model_dump(exclude_none=True)
             )
             response.raise_for_status()
-            return PredictorResponse(**response.json())
+            return PredictSingleResponse(**response.json())
 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Predictor request failed with status {e.response.status_code}: {e}")
+            # Try to parse error response
+            try:
+                error_data = e.response.json()
+                logger.error(f"Error details: {error_data}")
+            except Exception:
+                pass
+            raise
         except httpx.HTTPError as e:
-            logger.error(f"Predictor request failed: {e}")
-            return PredictorResponse(
-                status="error",
-                message=f"HTTP request failed: {str(e)}"
-            )
+            logger.error(f"Predictor HTTP request failed: {e}")
+            raise
         except Exception as e:
             logger.error(f"Unexpected error in predictor request: {e}")
-            return PredictorResponse(
-                status="error",
-                message=f"Unexpected error: {str(e)}"
-            )
+            raise
 
     # ========== Service Management API ==========
 
-    def health_check(self) -> PredictorHealthResponse:
+    def health_check(self) -> Dict[str, str]:
         """
         Check if Predictor service is healthy
 
         Returns:
-            PredictorHealthResponse: Service health status
+            dict: Health status response with {"status": "ok"}
 
         Raises:
             httpx.HTTPError: HTTP request failed
-
-        TODO: Implement Predictor service health check endpoint:
-              Endpoint: GET {predictor_base_url}/health
-              Response: {
-                  "status": "healthy" | "unhealthy",
-                  "service": "predictor",
-                  "version": str,
-                  "total_models": int
-              }
         """
         try:
-            # Call health check endpoint
             response = self.client.get(f"{self.base_url}/health")
             response.raise_for_status()
-            return PredictorHealthResponse(**response.json())
+            return response.json()
 
         except httpx.HTTPError as e:
             logger.error(f"Predictor health check failed: {e}")
             raise
-
-    def get_available_models(self) -> PredictorModelsResponse:
-        """
-        Get list of models available for prediction
-
-        Returns:
-            PredictorModelsResponse: List of available models with metadata
-
-        Raises:
-            httpx.HTTPError: HTTP request failed
-
-        TODO: Implement Predictor service models listing endpoint:
-              Endpoint: GET {predictor_base_url}/models
-              Response: {
-                  "status": "success" | "error",
-                  "models": [
-                      {
-                          "model_type": str,
-                          "model_name": str,
-                          "total_predictions": int,
-                          "hardware_types": [str, ...],
-                          "software_versions": [str, ...]
-                      },
-                      ...
-                  ]
-              }
-        """
-        try:
-            # Call models listing endpoint
-            response = self.client.get(f"{self.base_url}/models")
-            response.raise_for_status()
-            return PredictorModelsResponse(**response.json())
-
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to get available models: {e}")
-            raise
-
-    # ========== Convenience Methods ==========
-
-    def get_median_prediction(
-        self,
-        model_type: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> Optional[float]:
-        """
-        Get median (p50) execution time prediction
-
-        Convenience method that extracts the median prediction from the full
-        quantile response.
-
-        Args:
-            model_type: Model identifier
-            metadata: Optional task metadata
-
-        Returns:
-            float: Median predicted execution time in milliseconds, or None if prediction failed
-
-        TODO: This method depends on predict() being implemented
-        """
-        response = self.predict(model_type, metadata)
-
-        if response.status != "success":
-            logger.warning(f"Prediction failed for {model_type}: {response.message}")
-            return None
-
-        if not response.quantiles or not response.quantile_predictions:
-            logger.warning(f"No quantile data in response for {model_type}")
-            return None
-
-        # Find the median (0.5 quantile)
-        try:
-            median_idx = response.quantiles.index(0.5)
-            return response.quantile_predictions[median_idx]
-        except (ValueError, IndexError):
-            logger.warning(f"Could not find median quantile for {model_type}")
-            # Fallback: return middle value
-            mid_idx = len(response.quantile_predictions) // 2
-            return response.quantile_predictions[mid_idx]
-
-    def get_prediction_range(
-        self,
-        model_type: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        confidence_level: float = 0.8
-    ) -> Optional[tuple[float, float]]:
-        """
-        Get prediction range for given confidence level
-
-        Returns the prediction range (min, max) that covers the specified
-        confidence level (e.g., 80% confidence means 10th to 90th percentile).
-
-        Args:
-            model_type: Model identifier
-            metadata: Optional task metadata
-            confidence_level: Confidence level (0-1), default 0.8
-
-        Returns:
-            tuple[float, float]: (min_time, max_time) in milliseconds, or None if failed
-
-        TODO: This method depends on predict() being implemented
-        """
-        response = self.predict(model_type, metadata)
-
-        if response.status != "success" or not response.quantiles or not response.quantile_predictions:
-            return None
-
-        # Calculate quantile indices for confidence level
-        lower_q = (1 - confidence_level) / 2
-        upper_q = 1 - lower_q
-
-        try:
-            # Find closest quantiles
-            lower_idx = min(range(len(response.quantiles)),
-                          key=lambda i: abs(response.quantiles[i] - lower_q))
-            upper_idx = min(range(len(response.quantiles)),
-                          key=lambda i: abs(response.quantiles[i] - upper_q))
-
-            return (
-                response.quantile_predictions[lower_idx],
-                response.quantile_predictions[upper_idx]
-            )
-        except (ValueError, IndexError) as e:
-            logger.warning(f"Could not calculate prediction range: {e}")
-            return None
 
     def is_available(self) -> bool:
         """
@@ -318,12 +211,181 @@ class PredictorClient:
 
         Returns:
             bool: True if service is healthy and reachable
-
-        TODO: This method depends on health_check() being implemented
         """
         try:
             health = self.health_check()
-            return health.status == "healthy"
+            return health.get("status") == "ok"
         except Exception as e:
             logger.debug(f"Predictor service not available: {e}")
             return False
+
+    # ========== Backward Compatibility ==========
+
+    def predict(
+        self,
+        model_type: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> PredictSingleResponse:
+        """
+        Backward-compatible prediction method
+
+        This method extracts the required parameters from metadata and calls predict_single().
+        It's provided for backward compatibility with existing code.
+
+        Args:
+            model_type: Model type identifier (used as model_name if not in metadata)
+            metadata: Metadata dict that should contain:
+                - model_name: Optional, defaults to model_type
+                - hardware: Required, e.g., 'A100', 'V100', 'cpu'
+                - software_name: Required, e.g., 'vllm', 'pytorch'
+                - software_version: Required, e.g., '0.2.0'
+                - input_tokens: Optional input token count
+                - output_tokens: Optional output token count
+                - Any other fields will be passed in trace.input_feature
+
+        Returns:
+            PredictSingleResponse: Prediction result
+
+        Raises:
+            ValueError: If required fields are missing from metadata
+
+        Example:
+            >>> response = predictor.predict(
+            ...     "gpt-3.5-turbo",
+            ...     {
+            ...         "hardware": "A100",
+            ...         "software_name": "vllm",
+            ...         "software_version": "0.2.0",
+            ...         "input_tokens": 100
+            ...     }
+            ... )
+        """
+        metadata = metadata or {}
+
+        # Extract required parameters from metadata
+        model_name = metadata.get("model_name")
+        model_type = metadata.get("model_type")
+        hardware = metadata.get("hardware")
+        software_name = metadata.get("software_name")
+        software_version = metadata.get("software_version")
+
+        # Validate required fields
+        if not hardware:
+            raise ValueError("metadata must contain 'hardware' field")
+        if not software_name:
+            raise ValueError("metadata must contain 'software_name' field")
+        if not software_version:
+            raise ValueError("metadata must contain 'software_version' field")
+
+        # Build trace object from metadata
+        input_features = []
+
+        # Add common features
+        if "input_tokens" in metadata:
+            input_features.append({"param_name": "input_tokens", "val": metadata["input_tokens"]})
+        if "output_tokens" in metadata:
+            input_features.append({"param_name": "output_tokens", "val": metadata["output_tokens"]})
+        if "batch_size" in metadata:
+            input_features.append({"param_name": "batch_size", "val": metadata["batch_size"]})
+
+        # Add any other numeric features
+        skip_keys = {"model_name", "hardware", "software_name", "software_version",
+                     "input_tokens", "output_tokens", "batch_size", "server_time_cost",
+                     "confidence_level", "lookup_table", "lookup_table_name"}
+
+        for key, value in metadata.items():
+            if key not in skip_keys and isinstance(value, (int, float)):
+                input_features.append({"param_name": key, "val": value})
+
+        # Build trace object with model_id for proper model type detection
+        trace = {"input_feature": input_features, "model_id": model_name} if input_features else {"model_id": model_name}
+
+        # Extract optional parameters
+        confidence_level = metadata.get("confidence_level", 0.95)
+        lookup_table = metadata.get("lookup_table", False)
+        lookup_table_name = metadata.get("lookup_table_name")
+
+        # Call predict_single
+        return self.predict_single(
+            model_type=model_type,
+            model_name=model_name,
+            hardware=hardware,
+            software_name=software_name,
+            software_version=software_version,
+            trace=trace,
+            confidence_level=confidence_level,
+            lookup_table=lookup_table,
+            lookup_table_name=lookup_table_name
+        )
+
+    # ========== Convenience Methods ==========
+
+    def get_expected_time(
+        self,
+        model_type: str,
+        model_name: str,
+        hardware: str,
+        software_name: str,
+        software_version: str,
+        trace: Dict[str, Any],
+        confidence_level: float = 0.95,
+        lookup_table: bool = False,
+        lookup_table_name: Optional[str] = None
+    ) -> Optional[tuple[float, float]]:
+        """
+        Get expected execution time and error from prediction
+
+        Convenience method that extracts the expected time (mean) and error (std deviation)
+        from the prediction response.
+
+        Args:
+            model_type: Model type identifier
+            model_name: Model name
+            hardware: Hardware identifier
+            software_name: Framework name
+            software_version: Framework version
+            trace: Trace object containing task information
+            confidence_level: Confidence level for prediction (default: 0.95)
+            lookup_table: Whether to use lookup table
+            lookup_table_name: Name of lookup table to use
+
+        Returns:
+            tuple[float, float]: (expect, error) in milliseconds, or None if prediction failed
+                - expect: Expected execution time (mean)
+                - error: Standard deviation of execution time
+
+        Example:
+            >>> result = predictor.get_expected_time(
+            ...     "llm", "gpt-3.5-turbo", "A100", "vllm", "0.2.0",
+            ...     {"input_feature": [{"param_name": "input_tokens", "val": 100}]}
+            ... )
+            >>> if result:
+            ...     expect, error = result
+            ...     print(f"Expected: {expect}ms ± {error}ms")
+        """
+        try:
+            response = self.predict_single(
+                model_type=model_type,
+                model_name=model_name,
+                hardware=hardware,
+                software_name=software_name,
+                software_version=software_version,
+                trace=trace,
+                confidence_level=confidence_level,
+                lookup_table=lookup_table,
+                lookup_table_name=lookup_table_name
+            )
+
+            if response.results.status != "success":
+                logger.warning(f"Prediction failed: {response.results.status}")
+                return None
+
+            if response.results.expect is None or response.results.error is None:
+                logger.warning("Prediction response missing expect or error fields")
+                return None
+
+            return (response.results.expect, response.results.error)
+
+        except Exception as e:
+            logger.error(f"Failed to get expected time: {e}")
+            return None

@@ -17,6 +17,7 @@ from .models import (
     QueueInfoResponse, QueueInfoItem,
     TaskQueryResponse,
     TaskCompletionNotification,
+    ResultSubmitRequest, ResultSubmitResponse,
     SchedulerRequest,
     SetStrategyRequest, SetStrategyResponse,
     PredictModeRequest, PredictModeResponse
@@ -306,10 +307,79 @@ async def query_task(task_id: str = Query(..., description="Task ID")):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/result/submit", response_model=ResultSubmitResponse)
+async def submit_result(request: ResultSubmitRequest):
+    """
+    Receive task result submission from TaskInstance
+
+    This endpoint is called by TaskInstance when a task completes.
+    It processes the result and updates task tracking.
+
+    Args:
+        request: Result submission request containing task_id, result, and execution metrics
+
+    Returns:
+        Confirmation response
+    """
+    try:
+        # Find instance UUID by matching instance_id
+        instance_uuid = None
+        for ti in scheduler.taskinstances:
+            # Extract port from instance_id (format: "ti-<pid>")
+            # and match against TaskInstance base_url
+            try:
+                status = ti.instance.get_status()
+                if status.instance_id == request.instance_id:
+                    instance_uuid = ti.uuid
+                    break
+            except Exception as e:
+                logger.debug(f"Could not get status for instance {ti.uuid}: {e}")
+                continue
+
+        if instance_uuid is None:
+            logger.warning(
+                f"Received result for unknown instance: {request.instance_id}"
+            )
+            return ResultSubmitResponse(
+                status="error",
+                message=f"Instance {request.instance_id} not found"
+            )
+
+        # Process task completion
+        total_time = scheduler.handle_task_completion(
+            task_id=request.task_id,
+            instance_uuid=instance_uuid,
+            execution_time=request.execution_time
+        )
+
+        # Optional: Store result in TaskTracker
+        # scheduler.task_tracker.update_result(request.task_id, request.result)
+
+        logger.info(
+            f"Received result for task {request.task_id} from instance {request.instance_id}"
+        )
+
+        message = f"Result for task {request.task_id} received"
+        if total_time:
+            message += f" (total time: {total_time:.2f}ms)"
+
+        return ResultSubmitResponse(
+            status="success",
+            message=message
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to process result submission: {e}")
+        return ResultSubmitResponse(
+            status="error",
+            message=str(e)
+        )
+
+
 @app.post("/notify/task_complete")
 async def notify_task_completion(notification: TaskCompletionNotification):
     """
-    Receive task completion notification
+    Receive task completion notification (legacy endpoint)
 
     Args:
         notification: Task completion notification

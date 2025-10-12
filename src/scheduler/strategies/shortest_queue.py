@@ -4,13 +4,14 @@ Shortest Queue Strategy
 Strategy that selects the instance with shortest expected completion time,
 maintaining local queue state for accurate prediction.
 
-This is the most complex strategy, featuring:
-- Integration with Predictor (both API and lookup table modes)
-- Local queue state tracking
+This strategy features:
+- Integration with PredictorClient from predictor_client.py
+- Local queue state tracking (expected_ms and error_ms)
 - Error propagation using variance theory
+- Real-time prediction for each incoming request
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from uuid import UUID
 from loguru import logger
@@ -19,6 +20,7 @@ import time
 
 from .base import BaseStrategy, TaskInstance, TaskInstanceQueue, SelectionRequest
 from ..models import EnqueueResponse
+from ..predictor_client import PredictorClient
 
 
 @dataclass
@@ -36,8 +38,8 @@ class ShortestQueueStrategy(BaseStrategy):
 
     Features:
     - Selects instance with minimum expected_ms and minimum error_ms
-    - Maintains local queue state tracking
-    - Supports both lookup predictor and API predictor modes
+    - Maintains local queue state tracking in strategy
+    - Uses PredictorClient for execution time prediction
     - Uses error propagation theory for queue state updates
     """
 
@@ -45,74 +47,32 @@ class ShortestQueueStrategy(BaseStrategy):
         self,
         taskinstances: List[TaskInstance],
         predictor_url: str = "http://localhost:8100",
-        predictor_timeout: float = 10.0,
-        use_lookup_predictor: bool = False,
-        prediction_file: str = "/home/yanweiye/Project/swarmpilot/swarmpilot_taskinstance/pred.json"
+        predictor_timeout: float = 10.0
     ):
         """
-        Initialize ShortestQueue strategy with predictor integration
+        Initialize ShortestQueue strategy with PredictorClient
 
         Args:
             taskinstances: List of available TaskInstances
             predictor_url: URL of the Predictor service
             predictor_timeout: Timeout for predictor requests in seconds
-            use_lookup_predictor: If True, use lookup table instead of Predictor API
-            prediction_file: Path to prediction JSON file
         """
         super().__init__(taskinstances)
         self.predictor_url = predictor_url
         self.predictor_timeout = predictor_timeout
-        self.use_lookup_predictor = use_lookup_predictor
-        self.prediction_file = prediction_file
 
         # Track queue state for each TaskInstance
         self.queue_states: Dict[UUID, QueueState] = {}
         for ti in taskinstances:
             self.queue_states[ti.uuid] = QueueState()
 
-        # Track predictions for each enqueued request
-        self.request_predictions: Dict[Tuple[UUID, str], Tuple[float, float]] = {}
+        # PredictorClient instance
+        self.predictor_client = PredictorClient(
+            base_url=predictor_url,
+            timeout=predictor_timeout
+        )
 
-        # Initialize predictor based on mode
-        if self.use_lookup_predictor:
-            from ..predictor import LookupPredictor
-            self.lookup_predictor = LookupPredictor(prediction_file)
-            logger.info(f"Initialized ShortestQueueStrategy with lookup predictor from {prediction_file}")
-            stats = self.lookup_predictor.get_stats()
-            logger.info(f"Lookup predictor stats: {stats['successful_records']} successful records")
-        else:
-            self.lookup_predictor = None
-            logger.info("Initialized ShortestQueueStrategy with API predictor")
-
-        # Lazy-initialized API predictor clients
-        self._predictor_clients: Dict[tuple, Any] = {}
-
-    def _get_predictor_client(self, request: SelectionRequest):
-        """Get or create a predictor client for the given request"""
-        import sys
-        sys.path.append('/home/yanweiye/Project/swarmpilot/swarmpilot_taskinstance/src')
-        from predictor_api_wrapper import SchedulerPredictorClient
-
-        metadata = request.metadata
-        model_name = metadata.get('model_name', request.model_type)
-        hardware = metadata.get('hardware') or metadata.get('gpu_model', 'unknown')
-        software_name = metadata.get('software_name', 'vllm')
-        software_version = metadata.get('software_version', '0.1.0')
-
-        signature = (request.model_type, model_name, hardware, software_name, software_version)
-
-        if signature not in self._predictor_clients:
-            self._predictor_clients[signature] = SchedulerPredictorClient(
-                model_type=request.model_type,
-                model_name=model_name,
-                hardware=hardware,
-                software_name=software_name,
-                software_version=software_version,
-                base_url=self.predictor_url,
-                timeout=self.predictor_timeout
-            )
-
-        return self._predictor_clients[signature]
+        logger.info(f"Initialized ShortestQueueStrategy with PredictorClient at {predictor_url}")
 
     def _select_from_candidates(
         self,
@@ -121,31 +81,32 @@ class ShortestQueueStrategy(BaseStrategy):
     ) -> tuple[TaskInstance, TaskInstanceQueue]:
         """
         Select the instance with shortest expected completion time and smallest error
+        Uses locally maintained queue states instead of querying TaskInstance
         """
-        # Get fresh queue predictions
+        # Use locally maintained queue states
         updated_candidates = []
         for ti, old_queue_info in candidates:
             try:
-                client = ti.instance
-                status = client.get_status()
-                queue_size = status.queue_size
+                # Get queue state from local tracking
+                queue_state = self.queue_states.get(ti.uuid)
+                if queue_state is None:
+                    logger.warning(f"No queue state for TaskInstance {ti.uuid}, initializing")
+                    queue_state = QueueState()
+                    self.queue_states[ti.uuid] = queue_state
 
-                expected_ms = 0.0
-                error_ms = 0.0
+                # Get current queue size from TaskInstance
+                try:
+                    client = ti.instance
+                    status = client.get_status()
+                    queue_size = status.queue_size
+                except Exception as e:
+                    logger.debug(f"Failed to get status for TaskInstance {ti.uuid}: {e}")
+                    queue_size = old_queue_info.queue_size
 
-                if queue_size > 0:
-                    try:
-                        prediction = client.predict_queue()
-                        expected_ms = prediction.expected_ms
-                        error_ms = prediction.error_ms
-                    except Exception as e:
-                        logger.debug(f"Failed to get fresh prediction for TaskInstance {ti.uuid}: {e}")
-                        expected_ms = old_queue_info.expected_ms
-                        error_ms = old_queue_info.error_ms
-
+                # Create updated queue info using local state
                 updated_queue_info = TaskInstanceQueue(
-                    expected_ms=expected_ms,
-                    error_ms=error_ms,
+                    expected_ms=queue_state.expected_ms,
+                    error_ms=queue_state.error_ms,
                     queue_size=queue_size,
                     model_type=old_queue_info.model_type,
                     instance_id=old_queue_info.instance_id,
@@ -161,9 +122,9 @@ class ShortestQueueStrategy(BaseStrategy):
         # Select instance with minimum expected_ms and minimum error_ms
         selected = min(updated_candidates, key=lambda x: (x[1].expected_ms, x[1].error_ms))
 
-        logger.debug(
+        logger.info(
             f"ShortestQueueStrategy selected: instance {selected[0].uuid} "
-            f"with expected_ms={selected[1].expected_ms}, error_ms={selected[1].error_ms}"
+            f"with expected_ms={selected[1].expected_ms:.2f}ms, error_ms={selected[1].error_ms:.2f}ms"
         )
 
         return selected
@@ -177,7 +138,8 @@ class ShortestQueueStrategy(BaseStrategy):
         """
         Update queue state after task enqueue
 
-        Uses real execution time if provided, otherwise gets prediction
+        Uses PredictorClient to predict execution time and accumulates
+        the expectation and error to the target queue
         """
         try:
             # Check if real execution time is provided
@@ -186,28 +148,53 @@ class ShortestQueueStrategy(BaseStrategy):
                 task_error = sqrt(task_expected * 0.05)
                 logger.info(f"Using real execution time: {task_expected:.2f}ms")
             else:
-                # Get prediction
-                if self.use_lookup_predictor:
-                    prediction_response = self.lookup_predictor.predict(
-                        model_type=request.model_type,
-                        metadata=request.metadata
+                # Use PredictorClient to get prediction
+                logger.debug(f"Requesting prediction for model_type={request.model_type}")
+                prediction_response = self.predictor_client.predict(
+                    model_type=request.model_type,
+                    metadata=request.metadata
+                )
+
+                # Check prediction status (new format: response.results.status)
+                if prediction_response.results.status != "success":
+                    logger.warning(
+                        f"Prediction failed: {prediction_response.results.status}, "
+                        "skipping queue state update"
                     )
-                    if prediction_response is None:
-                        logger.warning(f"No prediction found, skipping queue state update")
-                        return
-                    quantiles = self._extract_quantile_predictions(prediction_response)
+                    return
+
+                # Use expect and error directly from results
+                if prediction_response.results.expect is not None and prediction_response.results.error is not None:
+                    task_expected = prediction_response.results.expect
+                    task_error = prediction_response.results.error
+                    logger.info(
+                        f"Prediction for {request.model_type}: "
+                        f"expected={task_expected:.2f}ms, error={task_error:.2f}ms"
+                    )
                 else:
-                    # Use API predictor (simplified for now)
-                    logger.warning("API predictor mode not fully implemented in refactored version")
-                    return
+                    # Fallback: Extract quantile predictions and compute summary
+                    if not prediction_response.results.quantiles or not prediction_response.results.quantile_predictions:
+                        logger.warning("No quantile data or expect/error in prediction response")
+                        return
 
-                summary = self._compute_distribution_summary(quantiles)
-                if not summary or 'expected_ms' not in summary:
-                    logger.warning("Could not get valid prediction")
-                    return
+                    # Convert to dict format for compatibility
+                    quantiles = {}
+                    for q, pred in zip(prediction_response.results.quantiles, prediction_response.results.quantile_predictions):
+                        quantiles[str(q)] = pred
 
-                task_expected = summary['expected_ms']
-                task_error = summary['error_ms']
+                    # Compute distribution summary
+                    summary = self._compute_distribution_summary(quantiles)
+                    if not summary or 'expected_ms' not in summary:
+                        logger.warning("Could not get valid prediction summary")
+                        return
+
+                    task_expected = summary['expected_ms']
+                    task_error = summary['error_ms']
+
+                    logger.info(
+                        f"Prediction for {request.model_type}: "
+                        f"expected={task_expected:.2f}ms, error={task_error:.2f}ms"
+                    )
 
             # Update queue state using error propagation
             queue_state = self.queue_states[selected_instance.uuid]
@@ -225,7 +212,7 @@ class ShortestQueueStrategy(BaseStrategy):
             )
 
         except Exception as e:
-            logger.error(f"Failed to update queue state: {e}")
+            logger.error(f"Failed to update queue state: {e}", exc_info=True)
 
     def update_queue_on_completion(self, instance_uuid: UUID, task_id: str, execution_time: float):
         """Update queue state when task completes"""
@@ -246,37 +233,6 @@ class ShortestQueueStrategy(BaseStrategy):
             f"Updated queue state on completion for instance {instance_uuid}: "
             f"{old_expected:.2f}ms -> {new_expected:.2f}ms (subtracted {execution_time:.2f}ms)"
         )
-
-    @staticmethod
-    def _extract_quantile_predictions(response: Dict[str, Any]) -> Dict[str, float]:
-        """Extract quantile predictions from predictor response"""
-        from collections.abc import Sequence
-
-        quantiles = response.get("quantiles")
-        predictions = response.get("quantile_predictions")
-
-        if not isinstance(quantiles, Sequence) or isinstance(quantiles, (str, bytes)):
-            return {}
-        if not isinstance(predictions, Sequence) or isinstance(predictions, (str, bytes)):
-            return {}
-
-        quantile_map: Dict[str, float] = {}
-        for index, quantile in enumerate(quantiles):
-            if index >= len(predictions):
-                break
-
-            try:
-                quantile_key = f"{float(quantile):.6g}"
-            except (TypeError, ValueError):
-                quantile_key = str(quantile)
-
-            prediction_value = predictions[index]
-            try:
-                quantile_map[quantile_key] = float(prediction_value)
-            except (TypeError, ValueError):
-                continue
-
-        return quantile_map
 
     @staticmethod
     def _compute_distribution_summary(quantiles: Dict[str, float]) -> Optional[Dict[str, Optional[float]]]:

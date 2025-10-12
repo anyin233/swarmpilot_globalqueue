@@ -5,6 +5,7 @@ Client for TaskInstance API (refactored, port-less architecture).
 Provides methods for model management, queue operations, and result retrieval.
 """
 import httpx
+import time
 from typing import Optional, Dict, Any, List
 
 from .models import (
@@ -119,16 +120,36 @@ class TaskInstanceClient:
         Raises:
             httpx.HTTPError: HTTP request failed
         """
-        response = self.client.get(f"{self.base_url}/status")
+        response = self.client.get(f"{self.base_url}/info")
         response.raise_for_status()
-        return InstanceStatusResponse(**response.json())
+        data = response.json()
+
+        # Adapt InstanceInfoResponse to InstanceStatusResponse
+        # TaskInstance returns: {status, timestamp, deployed_model, queue_info, instance_status, uptime}
+        # We need: {instance_id, model_type, replicas_running, queue_size, status}
+
+        deployed_model = data.get("deployed_model")
+        queue_info = data.get("queue_info", {})
+
+        # Extract instance_id from base_url
+        instance_id = self.base_url.replace("http://", "").replace("https://", "")
+
+        return InstanceStatusResponse(
+            instance_id=instance_id,
+            model_type=deployed_model.get("model_name") if deployed_model else None,
+            replicas_running=deployed_model.get("replicas") if deployed_model else 0,
+            queue_size=queue_info.get("length_of_queue", 0),
+            status=data.get("instance_status", "unknown")
+        )
 
     # ========== Queue Management API ==========
 
     def enqueue_task(
         self,
         input_data: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
+        model_name: Optional[str] = None
     ) -> EnqueueResponse:
         """
         Enqueue a task to this instance
@@ -136,6 +157,8 @@ class TaskInstanceClient:
         Args:
             input_data: Task input data
             metadata: Optional task metadata
+            task_id: Optional task ID (provided by Scheduler)
+            model_name: Model name for the task
 
         Returns:
             EnqueueResponse: Task ID and queue information
@@ -143,16 +166,30 @@ class TaskInstanceClient:
         Raises:
             httpx.HTTPError: HTTP request failed
         """
-        request_data = EnqueueRequest(
-            input_data=input_data,
-            metadata=metadata or {}
-        )
+        # If model_name not provided, get it from instance status
+        if model_name is None:
+            status = self.get_status()
+            model_name = status.model_type
+
+        request_data = {
+            "model_name": model_name,
+            "task_input": input_data,
+            "metadata": metadata or {},
+            "task_id": task_id
+        }
         response = self.client.post(
-            f"{self.base_url}/queue/enqueue",
-            json=request_data.model_dump()
+            f"{self.base_url}/queue/submit",
+            json=request_data
         )
         response.raise_for_status()
-        return EnqueueResponse(**response.json())
+        result = response.json()
+
+        # Adapt response format to EnqueueResponse
+        return EnqueueResponse(
+            task_id=result.get("task_id"),
+            queue_size=0,  # Not provided by new API
+            enqueue_time=time.time()
+        )
 
     def predict_queue(self) -> PredictResponse:
         """

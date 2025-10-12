@@ -60,8 +60,8 @@ class SwarmPilotScheduler:
         if self._strategy is None:
             self._strategy = ShortestQueueStrategy(
                 self.taskinstances,
-                use_lookup_predictor=True,
-                prediction_file="/home/yanweiye/Project/swarmpilot/swarmpilot_taskinstance/pred.json"
+                predictor_url="http://localhost:8100",
+                predictor_timeout=10.0
             )
         return self._strategy
 
@@ -88,8 +88,8 @@ class SwarmPilotScheduler:
         if strategy_class == ShortestQueueStrategy:
             self.strategy = strategy_class(
                 self.taskinstances,
-                use_lookup_predictor=True,
-                prediction_file="/home/yanweiye/Project/swarmpilot/swarmpilot_taskinstance/pred.json"
+                predictor_url="http://localhost:8100",
+                predictor_timeout=10.0
             )
         else:
             self.strategy = strategy_class(self.taskinstances)
@@ -218,24 +218,36 @@ class SwarmPilotScheduler:
 
         # Enqueue task to selected instance
         try:
+            # Generate task_id here before enqueueing
+            task_id = str(uuid4())
+
             enqueue_response = selected_instance.instance.enqueue_task(
                 input_data=request.input_data,
-                metadata=request.metadata
+                metadata=request.metadata,
+                task_id=task_id,
+                model_name=request.model_type
             )
+
+            # Verify task_id consistency
+            if enqueue_response.task_id != task_id:
+                logger.warning(
+                    f"Task ID mismatch: expected {task_id}, got {enqueue_response.task_id}"
+                )
+                task_id = enqueue_response.task_id  # Use the one from TaskInstance
 
             # Register task in tracker
             self.task_tracker.register_task(
-                task_id=enqueue_response.task_id,
+                task_id=task_id,
                 ti_uuid=selected_instance.uuid,
                 model_name=request.model_type,
                 submit_time=arrival_time
             )
 
             # Mark as scheduled
-            self.task_tracker.mark_scheduled(enqueue_response.task_id)
+            self.task_tracker.mark_scheduled(task_id)
 
             # Store arrival time
-            self.request_times[enqueue_response.task_id] = (arrival_time, request.request_id)
+            self.request_times[task_id] = (arrival_time, request.request_id)
 
             # Update queue state
             try:
@@ -250,7 +262,7 @@ class SwarmPilotScheduler:
             # Save routing information
             self.last_routing_info = {
                 "request_id": request.request_id,
-                "task_id": enqueue_response.task_id,
+                "task_id": task_id,
                 "instance_uuid": str(selected_instance.uuid),
                 "instance_url": selected_instance.instance.base_url,
                 "model_type": queue_info.model_type,
@@ -260,12 +272,12 @@ class SwarmPilotScheduler:
             }
 
             logger.info(
-                f"Task {enqueue_response.task_id} scheduled to instance {selected_instance.uuid} "
+                f"Task {task_id} scheduled to instance {selected_instance.uuid} "
                 f"(model: {queue_info.model_type}, expected: {queue_info.expected_ms}ms)"
             )
 
             return SchedulerResponse(
-                task_id=enqueue_response.task_id,
+                task_id=task_id,
                 instance_id=str(selected_instance.uuid),
                 instance_url=selected_instance.instance.base_url,
                 model_type=queue_info.model_type,
