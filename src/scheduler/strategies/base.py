@@ -79,6 +79,10 @@ class BaseStrategy(ABC):
         This method queries all TaskInstances and builds a list of candidates
         that match the requested model_type.
 
+        NOTE: This base implementation does NOT fetch queue predictions.
+        Subclasses that need queue prediction should override this method
+        or fetch predictions in their _select_from_candidates method.
+
         Args:
             request: Selection request containing model_type and other info
 
@@ -109,23 +113,14 @@ class BaseStrategy(ABC):
                     logger.debug(f"TaskInstance {ti.uuid} has no running replicas, skipping")
                     continue
 
-                # Get queue prediction
+                # Get queue size (but NOT prediction - let subclasses handle that)
                 queue_size = status.queue_size
-                expected_ms = 0.0
-                error_ms = 0.0
 
-                if queue_size > 0:
-                    try:
-                        prediction = client.predict_queue()
-                        expected_ms = prediction.expected_ms
-                        error_ms = prediction.error_ms
-                    except Exception as e:
-                        logger.debug(f"Failed to get prediction for TaskInstance {ti.uuid}: {e}")
-
-                # Create queue info
+                # Create basic queue info without prediction
+                # Subclasses can populate expected_ms/error_ms if needed
                 queue_info = TaskInstanceQueue(
-                    expected_ms=expected_ms,
-                    error_ms=error_ms,
+                    expected_ms=0.0,
+                    error_ms=0.0,
                     queue_size=queue_size,
                     model_type=status.model_type,
                     instance_id=status.instance_id,
