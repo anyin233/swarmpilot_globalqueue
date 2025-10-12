@@ -265,6 +265,25 @@ class TaskTracker:
             logger.info(f"Cleared {removed_count} completed tasks from tracker")
             return removed_count
 
+    def clear_all(self) -> int:
+        """
+        Remove ALL tasks from tracking (completed, scheduled, queued)
+
+        This is useful for resetting the tracker between experiments.
+
+        Returns:
+            Number of tasks removed
+        """
+        with self._lock:
+            task_count = len(self._tasks)
+            self._tasks.clear()
+            self._queued_count = 0
+            self._scheduled_count = 0
+            self._completed_count = 0
+
+            logger.info(f"Cleared all {task_count} tasks from tracker")
+            return task_count
+
     def get_statistics(self) -> Dict[str, Any]:
         """
         Get tracker statistics

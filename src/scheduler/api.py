@@ -20,8 +20,13 @@ from .models import (
     ResultSubmitRequest, ResultSubmitResponse,
     SchedulerRequest,
     SetStrategyRequest, SetStrategyResponse,
-    PredictModeRequest, PredictModeResponse
+    PredictModeRequest, PredictModeResponse,
+    FetchResultRequest, FetchResultResponse,
+    TaskStatus,
+    TaskInfoItem, AllTasksResponse,
+    ClearTasksResponse
 )
+from .task_tracker import TaskInfo
 
 # Initialize scheduler
 scheduler = SwarmPilotScheduler()
@@ -353,7 +358,7 @@ async def submit_result(request: ResultSubmitRequest):
         )
 
         # Optional: Store result in TaskTracker
-        # scheduler.task_tracker.update_result(request.task_id, request.result)
+        scheduler.task_tracker.mark_completed(request.task_id, request.result)
 
         logger.info(
             f"Received result for task {request.task_id} from instance {request.instance_id}"
@@ -425,6 +430,89 @@ async def notify_task_completion(notification: TaskCompletionNotification):
     except Exception as e:
         logger.error(f"Failed to process completion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/result/fetch")
+async def fetch_result(request: FetchResultRequest):
+    task_id = request.task_id
+    
+    task_info = scheduler.task_tracker.get_task_info(task_id)
+    
+    if task_info.task_status == TaskStatus.COMPLETED:
+        return FetchResultResponse(result=task_info.result)
+    
+
+@app.get("/result/fetch_all_completed")
+async def fetch_all_completed_result():
+    return scheduler.task_tracker.get_tasks_by_status(TaskStatus.COMPLETED)
+
+
+@app.get("/task/all_tasks", response_model=AllTasksResponse)
+async def get_all_tasks():
+    """
+    Get all tasks tracked by the scheduler
+
+    Returns:
+        All task information from Task Tracker
+    """
+    try:
+        # Get all tasks from TaskTracker
+        all_tasks = scheduler.task_tracker.get_all_tasks()
+
+        # Convert TaskInfo objects to TaskInfoItem models
+        task_items = []
+        for task_id, task_info in all_tasks.items():
+            task_item = TaskInfoItem(
+                task_id=task_info.task_id,
+                task_status=task_info.task_status,
+                scheduled_ti=str(task_info.scheduled_ti),
+                submit_time=task_info.submit_time,
+                model_name=task_info.model_name,
+                result=task_info.result,
+                completion_time=task_info.completion_time
+            )
+            task_items.append(task_item)
+
+        return AllTasksResponse(
+            status="success",
+            total_tasks=len(task_items),
+            tasks=task_items
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get all tasks: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/task/clear", response_model=ClearTasksResponse)
+async def clear_all_tasks():
+    """
+    Clear all tasks from the tracker
+
+    This endpoint removes all tasks (queued, scheduled, completed) from the
+    TaskTracker. This is useful for resetting the system between experiments
+    or test runs.
+
+    Returns:
+        Number of tasks cleared and status message
+    """
+    try:
+        cleared_count = scheduler.task_tracker.clear_all()
+
+        return ClearTasksResponse(
+            status="success",
+            message=f"Cleared {cleared_count} tasks from tracker",
+            cleared_count=cleared_count
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to clear tasks: {e}")
+        return ClearTasksResponse(
+            status="error",
+            message=f"Failed to clear tasks: {str(e)}",
+            cleared_count=0
+        )
+
+
 
 
 @app.on_event("startup")

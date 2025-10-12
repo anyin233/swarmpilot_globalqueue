@@ -547,3 +547,54 @@ class PredictTableResponse(BaseModel):
     """
     status: str = Field(..., description="'successful' or 'failed'")
     path: Optional[str] = Field(None, description="Path to generated lookup table")
+
+
+class FetchResultRequest(BaseModel):
+    """
+    /result/fetch - Fetch finished result
+    """
+    task_id: str = Field(..., description="Task unique identifier")
+
+
+class FetchResultResponse(BaseModel):
+    """
+    /result/fetch - Fetch finished result
+    """
+    result: Dict[str, Any]
+
+
+class TaskInfoItem(BaseModel):
+    """
+    Single task information item
+
+    Used for /task/all_tasks response
+    """
+    task_id: str = Field(..., description="Task ID")
+    task_status: TaskStatus = Field(..., description="Task status: queued, scheduled, completed")
+    scheduled_ti: str = Field(..., description="UUID of Task Instance scheduled to")
+    submit_time: float = Field(..., description="Submission timestamp")
+    model_name: str = Field(..., description="Model name for this task")
+    result: Optional[Any] = Field(None, description="Task result (if completed)")
+    completion_time: Optional[float] = Field(None, description="Completion timestamp (if completed)")
+
+
+class AllTasksResponse(BaseModel):
+    """
+    /task/all_tasks - Get all tasks response
+
+    Returns all tasks tracked by the scheduler
+    """
+    status: str = Field(..., description="'success' or 'error'")
+    total_tasks: int = Field(..., description="Total number of tasks")
+    tasks: List[TaskInfoItem] = Field(..., description="List of all task information")
+
+
+class ClearTasksResponse(BaseModel):
+    """
+    /task/clear - Clear all tasks response
+
+    Removes all tasks from the tracker to prepare for new experiments
+    """
+    status: str = Field(..., description="'success' or 'error'")
+    message: str = Field(..., description="Human-readable result message")
+    cleared_count: int = Field(..., description="Number of tasks cleared")
