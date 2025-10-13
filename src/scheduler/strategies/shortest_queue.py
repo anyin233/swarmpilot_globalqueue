@@ -196,6 +196,10 @@ class ShortestQueueStrategy(BaseStrategy):
         Uses PredictorClient to predict execution time and accumulates
         the expectation and error to the target queue
         """
+        logger.debug(
+            f"update_queue called for instance {selected_instance.uuid}, "
+            f"model_type={request.model_type}"
+        )
         try:
             # Check if real execution time is provided
             if 'server_time_cost' in request.metadata:
@@ -204,7 +208,7 @@ class ShortestQueueStrategy(BaseStrategy):
                 logger.info(f"Using real execution time: {task_expected:.2f}ms")
             else:
                 # Use PredictorClient to get prediction
-                logger.debug(f"Requesting prediction for model_type={request.model_type}")
+                logger.debug(f"Requesting prediction for model_type={request.model_type}, metadata={request.metadata}")
                 prediction_response = self.predictor_client.predict(
                     model_type=request.model_type,
                     metadata=request.metadata
@@ -213,8 +217,11 @@ class ShortestQueueStrategy(BaseStrategy):
                 # Check prediction status (new format: response.results.status)
                 if prediction_response.results.status != "success":
                     logger.warning(
-                        f"Prediction failed: {prediction_response.results.status}, "
-                        "skipping queue state update"
+                        f"Prediction failed for model_type={request.model_type}: "
+                        f"status={prediction_response.results.status}, "
+                        f"expect={prediction_response.results.expect}, "
+                        f"error={prediction_response.results.error}. "
+                        "Skipping queue state update"
                     )
                     return
 
@@ -228,8 +235,18 @@ class ShortestQueueStrategy(BaseStrategy):
                     )
                 else:
                     # Fallback: Extract quantile predictions and compute summary
+                    logger.debug(
+                        f"No expect/error in prediction response. "
+                        f"expect={prediction_response.results.expect}, "
+                        f"error={prediction_response.results.error}, "
+                        f"quantiles={prediction_response.results.quantiles}, "
+                        f"predictions={prediction_response.results.quantile_predictions}"
+                    )
                     if not prediction_response.results.quantiles or not prediction_response.results.quantile_predictions:
-                        logger.warning("No quantile data or expect/error in prediction response")
+                        logger.warning(
+                            f"No quantile data or expect/error in prediction response. "
+                            f"Model: {request.model_type}. Skipping queue state update"
+                        )
                         return
 
                     # Convert to dict format for compatibility
@@ -265,6 +282,27 @@ class ShortestQueueStrategy(BaseStrategy):
                 f"Updated queue state for instance {selected_instance.uuid}: "
                 f"expected={new_expected:.2f}ms, error={new_error:.2f}ms, tasks={queue_state.task_count}"
             )
+
+            # Write debug log after update if enabled
+            if self.get_debug_enabled():
+                queue_states_snapshot = {}
+                for ti in self.taskinstances:
+                    ti_queue_state = self.queue_states[ti.uuid]
+                    try:
+                        # Get current queue size
+                        status = ti.instance.get_status()
+                        queue_size = status.queue_size
+                    except Exception:
+                        queue_size = 0
+
+                    queue_states_snapshot[str(ti.uuid)] = {
+                        "expected_ms": ti_queue_state.expected_ms,
+                        "error_ms": ti_queue_state.error_ms,
+                        "queue_size": queue_size,
+                        "task_count": ti_queue_state.task_count,
+                        "selected": (ti.uuid == selected_instance.uuid)
+                    }
+                self._write_debug_log(queue_states_snapshot)
 
         except Exception as e:
             logger.error(f"Failed to update queue state: {e}", exc_info=True)
