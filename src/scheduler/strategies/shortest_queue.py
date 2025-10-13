@@ -150,12 +150,23 @@ class ShortestQueueStrategy(BaseStrategy):
                 logger.warning(f"Failed to update queue info for TaskInstance {ti.uuid}: {e}")
                 updated_candidates.append((ti, old_queue_info))
 
-        # Select instance with minimum expected_ms and minimum error_ms
-        selected = min(updated_candidates, key=lambda x: (x[1].expected_ms, x[1].error_ms))
+        # Select instance with minimum expected_ms, error_ms, and task_count (for tie-breaking)
+        # Adding task_count ensures fair distribution when queue times are equal
+        # Using UUID as final tie-breaker for deterministic behavior
+        selected = min(
+            updated_candidates,
+            key=lambda x: (
+                x[1].expected_ms,
+                x[1].error_ms,
+                self.queue_states[x[0].uuid].task_count,  # Prefer instances with fewer tasks
+                str(x[0].uuid)  # Deterministic tie-breaker
+            )
+        )
 
         logger.info(
             f"ShortestQueueStrategy selected: instance {selected[0].uuid} "
-            f"with expected_ms={selected[1].expected_ms:.2f}ms, error_ms={selected[1].error_ms:.2f}ms"
+            f"with expected_ms={selected[1].expected_ms:.2f}ms, error_ms={selected[1].error_ms:.2f}ms, "
+            f"task_count={self.queue_states[selected[0].uuid].task_count}"
         )
 
         # Write debug log if enabled
@@ -166,6 +177,7 @@ class ShortestQueueStrategy(BaseStrategy):
                     "expected_ms": queue_info.expected_ms,
                     "error_ms": queue_info.error_ms,
                     "queue_size": queue_info.queue_size,
+                    "task_count": self.queue_states[ti.uuid].task_count,
                     "selected": (ti.uuid == selected[0].uuid)
                 }
             self._write_debug_log(queue_states_snapshot)

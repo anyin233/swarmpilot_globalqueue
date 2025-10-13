@@ -32,6 +32,13 @@ class WeightedStrategy(BaseStrategy):
         super().__init__(taskinstances)
         self.error_weight = max(0.0, min(1.0, error_weight))
 
+        # Track task count for each TaskInstance (for tie-breaking)
+        from typing import Dict
+        from uuid import UUID
+        self.task_counts: Dict[UUID, int] = {}
+        for ti in taskinstances:
+            self.task_counts[ti.uuid] = 0
+
     def filter_instances(self, request: SelectionRequest) -> List[tuple[TaskInstance, TaskInstanceQueue]]:
         """
         Override filter_instances to include queue prediction for weighted selection
@@ -96,18 +103,20 @@ class WeightedStrategy(BaseStrategy):
             # Score = expected_ms + (error_weight * error_ms)
             # Higher error_weight means we're more conservative about uncertainty
             score = queue_info.expected_ms + (self.error_weight * queue_info.error_ms)
-            scores.append((score, instance, queue_info))
+            task_count = self.task_counts.get(instance.uuid, 0)
+            scores.append((score, task_count, str(instance.uuid), instance, queue_info))
 
-        # Select instance with minimum score
-        selected = min(scores, key=lambda x: x[0])
+        # Select instance with minimum score, using task_count and UUID for tie-breaking
+        # This ensures fair distribution when scores are equal
+        selected = min(scores, key=lambda x: (x[0], x[1], x[2]))
 
         logger.debug(
-            f"WeightedStrategy selected: instance {selected[1].uuid} "
-            f"with score={selected[0]:.2f} (expected={selected[2].expected_ms}, "
-            f"error={selected[2].error_ms})"
+            f"WeightedStrategy selected: instance {selected[3].uuid} "
+            f"with score={selected[0]:.2f} (expected={selected[4].expected_ms}, "
+            f"error={selected[4].error_ms}), task_count={selected[1]}"
         )
 
-        return selected[1], selected[2]
+        return selected[3], selected[4]
 
     def update_queue(
         self,
@@ -116,6 +125,14 @@ class WeightedStrategy(BaseStrategy):
         enqueue_response: EnqueueResponse
     ):
         """
-        WeightedStrategy does not maintain queue state
+        Update task count for the selected instance
         """
-        pass
+        if selected_instance.uuid in self.task_counts:
+            self.task_counts[selected_instance.uuid] += 1
+
+    def update_queue_on_completion(self, instance_uuid, task_id: str, execution_time: float):
+        """
+        Decrease task count when task completes
+        """
+        if instance_uuid in self.task_counts:
+            self.task_counts[instance_uuid] = max(0, self.task_counts[instance_uuid] - 1)
