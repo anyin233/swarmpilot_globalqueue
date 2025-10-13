@@ -24,12 +24,24 @@ from .models import (
     FetchResultRequest, FetchResultResponse,
     TaskStatus,
     TaskInfoItem, AllTasksResponse,
-    ClearTasksResponse
+    ClearTasksResponse,
+    SettingsSetRequest, SettingsSetResponse,
+    SettingsGetRequest, SettingsGetResponse
 )
 from .task_tracker import TaskInfo
 
-# Initialize scheduler
-scheduler = SwarmPilotScheduler()
+# Configuration storage
+settings_storage: dict = {
+    "predictor_strategy_debug": False
+}
+
+# Helper function to check if debug is enabled
+def get_debug_enabled() -> bool:
+    """Get debug enabled status from settings storage"""
+    return settings_storage.get("predictor_strategy_debug", False)
+
+# Initialize scheduler with debug callback
+scheduler = SwarmPilotScheduler(get_debug_enabled=get_debug_enabled)
 
 # FastAPI app
 app = FastAPI(
@@ -43,6 +55,105 @@ app = FastAPI(
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "scheduler", "version": "2.0.0"}
+
+
+@app.post("/settings/set", response_model=SettingsSetResponse)
+async def set_setting(request: SettingsSetRequest):
+    """
+    Set a configuration parameter
+
+    Args:
+        request: Settings set request containing key and value
+
+    Returns:
+        Result of setting operation
+    """
+    try:
+        # Validate known configuration keys
+        known_keys = ["predictor_strategy_debug"]
+        if request.key not in known_keys:
+            return SettingsSetResponse(
+                status="error",
+                message=f"Unknown configuration key '{request.key}'. Known keys: {', '.join(known_keys)}",
+                key=request.key,
+                value=request.value
+            )
+
+        # Type validation for specific keys
+        if request.key == "predictor_strategy_debug":
+            if not isinstance(request.value, bool):
+                return SettingsSetResponse(
+                    status="error",
+                    message=f"Configuration key '{request.key}' requires a boolean value",
+                    key=request.key,
+                    value=request.value
+                )
+
+        # Store the setting
+        settings_storage[request.key] = request.value
+
+        logger.info(f"Configuration updated: {request.key} = {request.value}")
+
+        return SettingsSetResponse(
+            status="success",
+            message=f"Configuration '{request.key}' set successfully",
+            key=request.key,
+            value=request.value
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to set configuration: {e}")
+        return SettingsSetResponse(
+            status="error",
+            message=str(e),
+            key=request.key,
+            value=request.value
+        )
+
+
+@app.post("/settings/get", response_model=SettingsGetResponse)
+async def get_setting(request: SettingsGetRequest):
+    """
+    Get a configuration parameter
+
+    Args:
+        request: Settings get request containing key
+
+    Returns:
+        Configuration value if exists
+    """
+    try:
+        key = request.key
+        exists = key in settings_storage
+
+        if not exists:
+            return SettingsGetResponse(
+                status="success",
+                message=f"Configuration key '{key}' not found",
+                key=key,
+                value=None,
+                exists=False
+            )
+
+        value = settings_storage[key]
+
+        return SettingsGetResponse(
+            status="success",
+            message="OK",
+            key=key,
+            value=value,
+            exists=True
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get configuration: {e}")
+        return SettingsGetResponse(
+            status="error",
+            message=str(e),
+            key=request.key,
+            value=None,
+            exists=False
+        )
 
 
 @app.post("/scheduler/set", response_model=SetStrategyResponse)

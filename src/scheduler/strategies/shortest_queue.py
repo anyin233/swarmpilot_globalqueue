@@ -11,12 +11,15 @@ This strategy features:
 - Real-time prediction for each incoming request
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 from loguru import logger
 from math import sqrt
 import time
+import json
+from datetime import datetime
+from pathlib import Path
 
 from .base import BaseStrategy, TaskInstance, TaskInstanceQueue, SelectionRequest
 from ..models import EnqueueResponse
@@ -47,7 +50,9 @@ class ShortestQueueStrategy(BaseStrategy):
         self,
         taskinstances: List[TaskInstance],
         predictor_url: str = "http://localhost:8100",
-        predictor_timeout: float = 10.0
+        predictor_timeout: float = 10.0,
+        debug_log_path: Optional[str] = None,
+        get_debug_enabled: Optional[Callable[[], bool]] = None
     ):
         """
         Initialize ShortestQueue strategy with PredictorClient
@@ -56,6 +61,8 @@ class ShortestQueueStrategy(BaseStrategy):
             taskinstances: List of available TaskInstances
             predictor_url: URL of the Predictor service
             predictor_timeout: Timeout for predictor requests in seconds
+            debug_log_path: Path to debug log file (default: "./shortest_queue_debug.jsonl")
+            get_debug_enabled: Callable to check if debug logging is enabled
         """
         super().__init__(taskinstances)
         self.predictor_url = predictor_url
@@ -72,7 +79,31 @@ class ShortestQueueStrategy(BaseStrategy):
             timeout=predictor_timeout
         )
 
+        # Debug logging configuration
+        self.debug_log_path = debug_log_path or "./shortest_queue_debug.jsonl"
+        self.get_debug_enabled = get_debug_enabled or (lambda: False)
+
         logger.info(f"Initialized ShortestQueueStrategy with PredictorClient at {predictor_url}")
+
+    def _write_debug_log(self, queue_states_snapshot: Dict[str, Dict[str, float]]):
+        """Write debug log entry to JSON file"""
+        try:
+            if not self.get_debug_enabled():
+                return
+
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "strategy": "shortest_queue",
+                "queue_states": queue_states_snapshot
+            }
+
+            # Append to JSONL file
+            Path(self.debug_log_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.debug_log_path, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+
+        except Exception as e:
+            logger.warning(f"Failed to write debug log: {e}")
 
     def _select_from_candidates(
         self,
@@ -126,6 +157,18 @@ class ShortestQueueStrategy(BaseStrategy):
             f"ShortestQueueStrategy selected: instance {selected[0].uuid} "
             f"with expected_ms={selected[1].expected_ms:.2f}ms, error_ms={selected[1].error_ms:.2f}ms"
         )
+
+        # Write debug log if enabled
+        if self.get_debug_enabled():
+            queue_states_snapshot = {}
+            for ti, queue_info in updated_candidates:
+                queue_states_snapshot[str(ti.uuid)] = {
+                    "expected_ms": queue_info.expected_ms,
+                    "error_ms": queue_info.error_ms,
+                    "queue_size": queue_info.queue_size,
+                    "selected": (ti.uuid == selected[0].uuid)
+                }
+            self._write_debug_log(queue_states_snapshot)
 
         return selected
 

@@ -598,3 +598,43 @@ class ClearTasksResponse(BaseModel):
     status: str = Field(..., description="'success' or 'error'")
     message: str = Field(..., description="Human-readable result message")
     cleared_count: int = Field(..., description="Number of tasks cleared")
+
+
+# ========== Settings API Models ==========
+
+class SettingsSetRequest(BaseModel):
+    """
+    /settings/set - Set configuration request
+
+    Sets a specific configuration parameter
+    """
+    key: str = Field(..., description="Configuration key")
+    value: Any = Field(..., description="Configuration value")
+
+
+class SettingsSetResponse(BaseModel):
+    """
+    /settings/set - Set configuration response
+    """
+    status: str = Field(..., description="'success' or 'error'")
+    message: str = Field(..., description="Result message")
+    key: str = Field(..., description="Configuration key that was set")
+    value: Any = Field(..., description="Configuration value that was set")
+
+
+class SettingsGetRequest(BaseModel):
+    """
+    /settings/get - Get configuration request
+    """
+    key: str = Field(..., description="Configuration key to retrieve")
+
+
+class SettingsGetResponse(BaseModel):
+    """
+    /settings/get - Get configuration response
+    """
+    status: str = Field(..., description="'success' or 'error'")
+    message: str = Field(..., description="Result message")
+    key: str = Field(..., description="Configuration key")
+    value: Optional[Any] = Field(None, description="Configuration value")
+    exists: bool = Field(..., description="Whether the key exists")

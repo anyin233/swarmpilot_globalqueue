@@ -6,7 +6,7 @@ Integrates with TaskTracker for task state management.
 """
 
 from loguru import logger
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from uuid import uuid4, UUID
 import yaml
 import time
@@ -36,17 +36,19 @@ class SwarmPilotScheduler:
     - Dynamic instance management
     """
 
-    def __init__(self, strategy: Optional[BaseStrategy] = None):
+    def __init__(self, strategy: Optional[BaseStrategy] = None, get_debug_enabled: Optional[Callable[[], bool]] = None):
         """
         Initialize Scheduler
 
         Args:
             strategy: TaskInstance selection strategy (defaults to ShortestQueue)
+            get_debug_enabled: Callable to check if debug logging is enabled
         """
         self.taskinstances: List[TaskInstance] = []
         self._strategy = strategy
         self.task_tracker = TaskTracker()
         self.last_routing_info: Optional[Dict[str, Any]] = None
+        self.get_debug_enabled = get_debug_enabled or (lambda: False)
 
         # Track request arrival times for timing calculation
         self.request_times: Dict[str, tuple[float, str]] = {}
@@ -61,7 +63,8 @@ class SwarmPilotScheduler:
             self._strategy = ShortestQueueStrategy(
                 self.taskinstances,
                 predictor_url="http://localhost:8100",
-                predictor_timeout=10.0
+                predictor_timeout=10.0,
+                get_debug_enabled=self.get_debug_enabled
             )
         return self._strategy
 
@@ -89,7 +92,15 @@ class SwarmPilotScheduler:
             self.strategy = strategy_class(
                 self.taskinstances,
                 predictor_url="http://localhost:8100",
-                predictor_timeout=10.0
+                predictor_timeout=10.0,
+                get_debug_enabled=self.get_debug_enabled
+            )
+        elif strategy_class == ProbabilisticQueueStrategy:
+            self.strategy = strategy_class(
+                self.taskinstances,
+                predictor_url="http://localhost:8100",
+                predictor_timeout=10.0,
+                get_debug_enabled=self.get_debug_enabled
             )
         else:
             self.strategy = strategy_class(self.taskinstances)

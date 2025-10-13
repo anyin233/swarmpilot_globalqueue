@@ -13,13 +13,16 @@ Features:
 - Shorter queues have higher probability of being selected
 """
 
-from typing import List, Dict
+from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
 from loguru import logger
 from math import sqrt
 import random
 import time
+import json
+from datetime import datetime
+from pathlib import Path
 
 from .base import BaseStrategy, TaskInstance, TaskInstanceQueue, SelectionRequest
 from ..models import EnqueueResponse
@@ -59,7 +62,9 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         predictor_url: str = "http://localhost:8100",
         predictor_timeout: float = 10.0,
         min_weight: float = 0.01,
-        epsilon: float = 1.0
+        epsilon: float = 1.0,
+        debug_log_path: Optional[str] = None,
+        get_debug_enabled: Optional[Callable[[], bool]] = None
     ):
         """
         Initialize ProbabilisticQueue strategy with PredictorClient
@@ -70,6 +75,8 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             predictor_timeout: Timeout for predictor requests in seconds
             min_weight: Minimum weight for any queue (default: 0.01)
             epsilon: Small constant added to expected_ms to avoid division by zero (default: 1.0ms)
+            debug_log_path: Path to debug log file (default: "./probabilistic_queue_debug.jsonl")
+            get_debug_enabled: Callable to check if debug logging is enabled
         """
         super().__init__(taskinstances)
         self.predictor_url = predictor_url
@@ -88,10 +95,34 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             timeout=predictor_timeout
         )
 
+        # Debug logging configuration
+        self.debug_log_path = debug_log_path or "./probabilistic_queue_debug.jsonl"
+        self.get_debug_enabled = get_debug_enabled or (lambda: False)
+
         logger.info(
             f"Initialized ProbabilisticQueueStrategy with PredictorClient at {predictor_url}, "
             f"min_weight={min_weight}, epsilon={epsilon}ms"
         )
+
+    def _write_debug_log(self, queue_states_snapshot: Dict[str, Dict[str, float]]):
+        """Write debug log entry to JSON file"""
+        try:
+            if not self.get_debug_enabled():
+                return
+
+            log_entry = {
+                "timestamp": datetime.now().isoformat(),
+                "strategy": "probabilistic",
+                "queue_states": queue_states_snapshot
+            }
+
+            # Append to JSONL file
+            Path(self.debug_log_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(self.debug_log_path, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+
+        except Exception as e:
+            logger.warning(f"Failed to write debug log: {e}")
 
     def _select_from_candidates(
         self,
@@ -174,6 +205,19 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             f"ProbabilisticQueueStrategy selected: instance {selected[0].uuid} "
             f"with expected_ms={selected[1].expected_ms:.2f}ms, error_ms={selected[1].error_ms:.2f}ms"
         )
+
+        # Write debug log if enabled
+        if self.get_debug_enabled():
+            queue_states_snapshot = {}
+            for (ti, queue_info), weight in zip(updated_candidates, weights):
+                queue_states_snapshot[str(ti.uuid)] = {
+                    "expected_ms": queue_info.expected_ms,
+                    "error_ms": queue_info.error_ms,
+                    "queue_size": queue_info.queue_size,
+                    "weight": weight,
+                    "selected": (ti.uuid == selected[0].uuid)
+                }
+            self._write_debug_log(queue_states_snapshot)
 
         return selected
 
