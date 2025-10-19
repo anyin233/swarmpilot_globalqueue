@@ -23,10 +23,23 @@ import time
 import json
 from datetime import datetime
 from pathlib import Path
+import numpy as np
+from scipy import stats
+from scipy import integrate
+
 
 from .base import BaseStrategy, TaskInstance, TaskInstanceQueue, SelectionRequest
 from ..models import EnqueueResponse
 from ..predictor_client import PredictorClient
+
+
+@dataclass
+class TaskPrediction:
+    """Single task prediction information cache"""
+    task_id: str
+    expected_ms: float
+    error_ms: float
+    enqueue_time: float
 
 
 @dataclass
@@ -36,6 +49,8 @@ class QueueState:
     error_ms: float = 0.0
     last_update_time: float = field(default_factory=time.time)
     task_count: int = 0
+    # Pending tasks prediction cache for error recalculation
+    pending_tasks: Dict[str, TaskPrediction] = field(default_factory=dict)
 
 
 class ProbabilisticQueueStrategy(BaseStrategy):
@@ -63,6 +78,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         predictor_timeout: float = 10.0,
         min_weight: float = 0.01,
         epsilon: float = 1.0,
+        error_recalc_threshold: float = 2.0,
         debug_log_path: Optional[str] = None,
         get_debug_enabled: Optional[Callable[[], bool]] = None
     ):
@@ -75,6 +91,8 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             predictor_timeout: Timeout for predictor requests in seconds
             min_weight: Minimum weight for any queue (default: 0.01)
             epsilon: Small constant added to expected_ms to avoid division by zero (default: 1.0ms)
+            error_recalc_threshold: Error recalculation threshold (default: 2.0)
+                When error_ms > threshold * expected_ms, trigger recalculation
             debug_log_path: Path to debug log file (default: "./probabilistic_queue_debug.jsonl")
             get_debug_enabled: Callable to check if debug logging is enabled
         """
@@ -83,6 +101,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         self.predictor_timeout = predictor_timeout
         self.min_weight = max(0.0, min(1.0, min_weight))
         self.epsilon = max(0.1, epsilon)  # Ensure epsilon is at least 0.1ms
+        self.error_recalc_threshold = error_recalc_threshold
 
         # Track queue state for each TaskInstance
         self.queue_states: Dict[UUID, QueueState] = {}
@@ -123,6 +142,50 @@ class ProbabilisticQueueStrategy(BaseStrategy):
 
         except Exception as e:
             logger.warning(f"Failed to write debug log: {e}")
+    
+    def _calculate_shortest_queue_probabilities_optimized(self, queues):
+        n_queues = len(queues)
+        probabilities = np.zeros(n_queues)
+
+        for i, q in enumerate(queues):
+            A_i = q[0]
+            E_i = q[1]
+
+            # Handle edge case: if E_i is zero or very small, use epsilon
+            if E_i < self.epsilon:
+                E_i = self.epsilon
+
+            # 使用标准化变量 z = (x - A_i) / E_i
+            def integrand_standardized(z):
+                # 标准正态分布的PDF
+                pdf_std = stats.norm.pdf(z)
+
+                # x = A_i + E_i * z
+                x = A_i + E_i * z
+
+                # 连乘项
+                product = 1.0
+                for j in range(n_queues):
+                    if j != i:
+                        A_j = queues[j][0]  # Fixed: should access queues[j], not q
+                        E_j = queues[j][1]  # Fixed: should access queues[j], not q
+
+                        # Handle edge case: if E_j is zero or very small, use epsilon
+                        if E_j < self.epsilon:
+                            E_j = self.epsilon
+
+                        # P(l_j > x) = Gamma((A_j - x) / E_j)
+                        standardized_value = (A_j - x) / E_j
+                        tail_prob = stats.norm.cdf(standardized_value)
+                        product *= tail_prob
+
+                return pdf_std * product
+
+            # 积分区间：[-1, 1] (标准化后)
+            result, error = integrate.quad(integrand_standardized, -1, 1)
+            probabilities[i] = result
+
+        return probabilities
 
     def _select_from_candidates(
         self,
@@ -178,16 +241,9 @@ class ProbabilisticQueueStrategy(BaseStrategy):
                 logger.warning(f"Failed to update queue info for TaskInstance {ti.uuid}: {e}")
                 updated_candidates.append((ti, old_queue_info))
 
-        # Calculate weights based on inverse expected time
-        weights = []
-        for ti, queue_info in updated_candidates:
-            # Weight = 1 / (expected_ms + epsilon)
-            # Shorter expected times get higher weights (higher probability)
-            # epsilon prevents division by zero for empty queues
-            weight = 1.0 / (queue_info.expected_ms + self.epsilon)
-            # Apply minimum weight floor
-            weight = max(weight, self.min_weight)
-            weights.append(weight)
+        queue_info = [(q.expected_ms, q.error_ms) for ti, q in updated_candidates]
+        
+        weights = self._calculate_shortest_queue_probabilities_optimized(queue_info)
 
         # Log weights for debugging
         logger.debug(
@@ -267,8 +323,18 @@ class ProbabilisticQueueStrategy(BaseStrategy):
                     logger.warning("No expect/error in prediction response")
                     return
 
-            # Update queue state using error propagation
+            # Cache task prediction information for error recalculation
+            task_id = enqueue_response.task_id
             queue_state = self.queue_states[selected_instance.uuid]
+
+            queue_state.pending_tasks[task_id] = TaskPrediction(
+                task_id=task_id,
+                expected_ms=task_expected,
+                error_ms=task_error,
+                enqueue_time=enqueue_response.enqueue_time
+            )
+
+            # Update queue state using error propagation
             new_expected = queue_state.expected_ms + task_expected
             new_error = sqrt(queue_state.error_ms ** 2 + task_error ** 2)
 
@@ -286,21 +352,73 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             logger.error(f"Failed to update queue state: {e}", exc_info=True)
 
     def update_queue_on_completion(self, instance_uuid: UUID, task_id: str, execution_time: float):
-        """Update queue state when task completes"""
+        """
+        Update queue state when task completes with error recalculation
+
+        This method:
+        1. Removes completed task from pending_tasks cache
+        2. Subtracts actual execution time from expected_ms
+        3. Checks if error ratio exceeds threshold
+        4. If yes, recalculates queue state from remaining pending tasks
+        """
         if instance_uuid not in self.queue_states:
             logger.warning(f"Received completion for unknown instance {instance_uuid}")
             return
 
         queue_state = self.queue_states[instance_uuid]
         old_expected = queue_state.expected_ms
+        old_error = queue_state.error_ms
 
-        # Subtract actual execution time
+        # Step 1: Remove completed task from cache (for recalculation)
+        if task_id in queue_state.pending_tasks:
+            queue_state.pending_tasks.pop(task_id)
+            logger.debug(f"Removed task {task_id} from pending_tasks cache")
+        else:
+            logger.warning(
+                f"Task {task_id} not found in pending_tasks cache for instance {instance_uuid}"
+            )
+
+        # Step 2: Subtract actual execution time (maintain current behavior)
         new_expected = max(0.0, old_expected - execution_time)
         queue_state.expected_ms = new_expected
         queue_state.task_count = max(0, queue_state.task_count - 1)
-        queue_state.last_update_time = time.time()
 
-        logger.info(
-            f"Updated queue state on completion for instance {instance_uuid}: "
-            f"{old_expected:.2f}ms -> {new_expected:.2f}ms (subtracted {execution_time:.2f}ms)"
+        # Step 3: Check if error recalculation is needed
+        should_recalculate = (
+            queue_state.expected_ms > 0 and
+            old_error > self.error_recalc_threshold * queue_state.expected_ms
         )
+
+        if should_recalculate:
+            logger.warning(
+                f"High error ratio detected for instance {instance_uuid}: "
+                f"error={old_error:.2f}ms > {self.error_recalc_threshold}×expected={queue_state.expected_ms:.2f}ms. "
+                f"Triggering queue state recalculation from {len(queue_state.pending_tasks)} pending tasks."
+            )
+
+            # Step 4: Recalculate from pending tasks
+            recalculated_expected = 0.0
+            recalculated_variance = 0.0
+
+            for pending_task in queue_state.pending_tasks.values():
+                recalculated_expected += pending_task.expected_ms
+                recalculated_variance += pending_task.error_ms ** 2
+
+            # Override current values with recalculated ones
+            queue_state.expected_ms = recalculated_expected
+            queue_state.error_ms = sqrt(recalculated_variance) if recalculated_variance > 0 else 0.0
+
+            logger.info(
+                f"Recalculated queue state for instance {instance_uuid}: "
+                f"expected={old_expected:.2f}ms -> {queue_state.expected_ms:.2f}ms (recalculated from pending tasks), "
+                f"error={old_error:.2f}ms -> {queue_state.error_ms:.2f}ms, "
+                f"tasks={queue_state.task_count}"
+            )
+        else:
+            logger.info(
+                f"Updated queue state on completion for instance {instance_uuid}: "
+                f"expected={old_expected:.2f}ms -> {new_expected:.2f}ms (subtracted {execution_time:.2f}ms), "
+                f"error={old_error:.2f}ms, tasks={queue_state.task_count}"
+            )
+
+        queue_state.last_update_time = time.time()
