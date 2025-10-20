@@ -35,6 +35,7 @@ class RandomStrategy(BaseStrategy):
             Selected (TaskInstance, TaskInstanceQueue) tuple
         """
         import random
+        random.seed(42)
         selected = random.choice(candidates)
 
         print(f"RandomStrategy selected instance {selected[0].uuid}")

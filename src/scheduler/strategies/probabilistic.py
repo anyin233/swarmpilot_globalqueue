@@ -32,6 +32,7 @@ from .base import BaseStrategy, TaskInstance, TaskInstanceQueue, SelectionReques
 from ..models import EnqueueResponse
 from ..predictor_client import PredictorClient
 
+random.seed(42)
 
 @dataclass
 class TaskPrediction:
@@ -80,7 +81,9 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         epsilon: float = 1.0,
         error_recalc_threshold: float = 2.0,
         debug_log_path: Optional[str] = None,
-        get_debug_enabled: Optional[Callable[[], bool]] = None
+        get_debug_enabled: Optional[Callable[[], bool]] = None,
+        fake_data_bypass: bool = False,
+        fake_data_path: Optional[str] = None
     ):
         """
         Initialize ProbabilisticQueue strategy with PredictorClient
@@ -95,6 +98,8 @@ class ProbabilisticQueueStrategy(BaseStrategy):
                 When error_ms > threshold * expected_ms, trigger recalculation
             debug_log_path: Path to debug log file (default: "./probabilistic_queue_debug.jsonl")
             get_debug_enabled: Callable to check if debug logging is enabled
+            fake_data_bypass: Enable fake data bypass mode
+            fake_data_path: Path to fake data directory
         """
         super().__init__(taskinstances)
         self.predictor_url = predictor_url
@@ -111,7 +116,9 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         # PredictorClient instance
         self.predictor_client = PredictorClient(
             base_url=predictor_url,
-            timeout=predictor_timeout
+            timeout=predictor_timeout,
+            fake_data_bypass=fake_data_bypass,
+            fake_data_path=fake_data_path
         )
 
         # Debug logging configuration

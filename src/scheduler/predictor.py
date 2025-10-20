@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 from loguru import logger
 
+random.seed(42)
 
 class LookupPredictor:
     """

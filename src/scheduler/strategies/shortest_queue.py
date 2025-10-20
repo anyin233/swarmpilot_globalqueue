@@ -64,7 +64,9 @@ class ShortestQueueStrategy(BaseStrategy):
         predictor_timeout: float = 10.0,
         error_recalc_threshold: float = 2.0,
         debug_log_path: Optional[str] = None,
-        get_debug_enabled: Optional[Callable[[], bool]] = None
+        get_debug_enabled: Optional[Callable[[], bool]] = None,
+        fake_data_bypass: bool = False,
+        fake_data_path: Optional[str] = None
     ):
         """
         Initialize ShortestQueue strategy with PredictorClient
@@ -77,6 +79,8 @@ class ShortestQueueStrategy(BaseStrategy):
                 When error_ms > threshold * expected_ms, trigger recalculation
             debug_log_path: Path to debug log file (default: "./shortest_queue_debug.jsonl")
             get_debug_enabled: Callable to check if debug logging is enabled
+            fake_data_bypass: Enable fake data bypass mode
+            fake_data_path: Path to fake data directory
         """
         super().__init__(taskinstances)
         self.predictor_url = predictor_url
@@ -91,7 +95,9 @@ class ShortestQueueStrategy(BaseStrategy):
         # PredictorClient instance
         self.predictor_client = PredictorClient(
             base_url=predictor_url,
-            timeout=predictor_timeout
+            timeout=predictor_timeout,
+            fake_data_bypass=fake_data_bypass,
+            fake_data_path=fake_data_path
         )
 
         # Debug logging configuration

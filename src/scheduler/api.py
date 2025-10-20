@@ -32,7 +32,9 @@ from .task_tracker import TaskInfo
 
 # Configuration storage
 settings_storage: dict = {
-    "predictor_strategy_debug": False
+    "predictor_strategy_debug": False,
+    "fake_data_enabled": False,
+    "fake_data_path": None
 }
 
 # Helper function to check if debug is enabled
@@ -40,8 +42,21 @@ def get_debug_enabled() -> bool:
     """Get debug enabled status from settings storage"""
     return settings_storage.get("predictor_strategy_debug", False)
 
-# Initialize scheduler with debug callback
-scheduler = SwarmPilotScheduler(get_debug_enabled=get_debug_enabled)
+# Helper functions to get fake data settings
+def get_fake_data_enabled() -> bool:
+    """Get fake data enabled status from settings storage"""
+    return settings_storage.get("fake_data_enabled", False)
+
+def get_fake_data_path() -> Optional[str]:
+    """Get fake data path from settings storage"""
+    return settings_storage.get("fake_data_path")
+
+# Initialize scheduler with callbacks
+scheduler = SwarmPilotScheduler(
+    get_debug_enabled=get_debug_enabled,
+    get_fake_data_enabled=get_fake_data_enabled,
+    get_fake_data_path=get_fake_data_path
+)
 
 # FastAPI app
 app = FastAPI(
@@ -70,7 +85,7 @@ async def set_setting(request: SettingsSetRequest):
     """
     try:
         # Validate known configuration keys
-        known_keys = ["predictor_strategy_debug"]
+        known_keys = ["predictor_strategy_debug", "fake_data_enabled", "fake_data_path"]
         if request.key not in known_keys:
             return SettingsSetResponse(
                 status="error",
@@ -88,9 +103,35 @@ async def set_setting(request: SettingsSetRequest):
                     key=request.key,
                     value=request.value
                 )
+        elif request.key == "fake_data_enabled":
+            if not isinstance(request.value, bool):
+                return SettingsSetResponse(
+                    status="error",
+                    message=f"Configuration key '{request.key}' requires a boolean value",
+                    key=request.key,
+                    value=request.value
+                )
+        elif request.key == "fake_data_path":
+            if request.value is not None and not isinstance(request.value, str):
+                return SettingsSetResponse(
+                    status="error",
+                    message=f"Configuration key '{request.key}' requires a string value or null",
+                    key=request.key,
+                    value=request.value
+                )
 
         # Store the setting
         settings_storage[request.key] = request.value
+
+        # Special handling: reinitialize strategy when fake_data settings change
+        if request.key in ["fake_data_enabled", "fake_data_path"]:
+            try:
+                current_strategy_name = scheduler.get_current_strategy_name()
+                if current_strategy_name:
+                    logger.info(f"Reinitializing {current_strategy_name} strategy with new fake_data settings")
+                    scheduler.set_strategy(current_strategy_name)
+            except Exception as e:
+                logger.warning(f"Failed to reinitialize strategy after fake_data settings change: {e}")
 
         logger.info(f"Configuration updated: {request.key} = {request.value}")
 

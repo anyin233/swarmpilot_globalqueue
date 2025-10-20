@@ -36,19 +36,30 @@ class SwarmPilotScheduler:
     - Dynamic instance management
     """
 
-    def __init__(self, strategy: Optional[BaseStrategy] = None, get_debug_enabled: Optional[Callable[[], bool]] = None):
+    def __init__(
+        self,
+        strategy: Optional[BaseStrategy] = None,
+        get_debug_enabled: Optional[Callable[[], bool]] = None,
+        get_fake_data_enabled: Optional[Callable[[], bool]] = None,
+        get_fake_data_path: Optional[Callable[[], Optional[str]]] = None
+    ):
         """
         Initialize Scheduler
 
         Args:
             strategy: TaskInstance selection strategy (defaults to ShortestQueue)
             get_debug_enabled: Callable to check if debug logging is enabled
+            get_fake_data_enabled: Callable to check if fake data mode is enabled
+            get_fake_data_path: Callable to get fake data path
         """
         self.taskinstances: List[TaskInstance] = []
         self._strategy = strategy
         self.task_tracker = TaskTracker()
         self.last_routing_info: Optional[Dict[str, Any]] = None
         self.get_debug_enabled = get_debug_enabled or (lambda: False)
+        self.get_fake_data_enabled = get_fake_data_enabled or (lambda: False)
+        self.get_fake_data_path = get_fake_data_path or (lambda: None)
+        self._current_strategy_name: Optional[str] = None
 
         # Track request arrival times for timing calculation
         self.request_times: Dict[str, tuple[float, str]] = {}
@@ -88,24 +99,37 @@ class SwarmPilotScheduler:
         if not strategy_class:
             raise ValueError(f"Unknown strategy: {strategy_name}")
 
+        # Get fake data settings
+        fake_data_enabled = self.get_fake_data_enabled()
+        fake_data_path = self.get_fake_data_path()
+
         if strategy_class == ShortestQueueStrategy:
             self.strategy = strategy_class(
                 self.taskinstances,
                 predictor_url="http://localhost:8100",
                 predictor_timeout=10.0,
-                get_debug_enabled=self.get_debug_enabled
+                get_debug_enabled=self.get_debug_enabled,
+                fake_data_bypass=fake_data_enabled,
+                fake_data_path=fake_data_path
             )
         elif strategy_class == ProbabilisticQueueStrategy:
             self.strategy = strategy_class(
                 self.taskinstances,
                 predictor_url="http://localhost:8100",
                 predictor_timeout=10.0,
-                get_debug_enabled=self.get_debug_enabled
+                get_debug_enabled=self.get_debug_enabled,
+                fake_data_bypass=fake_data_enabled,
+                fake_data_path=fake_data_path
             )
         else:
             self.strategy = strategy_class(self.taskinstances)
 
-        logger.info(f"Set scheduling strategy to: {strategy_name}")
+        self._current_strategy_name = strategy_name
+        logger.info(f"Set scheduling strategy to: {strategy_name} (fake_data_enabled={fake_data_enabled}, fake_data_path={fake_data_path})")
+
+    def get_current_strategy_name(self) -> Optional[str]:
+        """Get current strategy name"""
+        return self._current_strategy_name
 
     def load_task_instances_from_config(self, config_path: str) -> None:
         """Load TaskInstances from configuration file"""

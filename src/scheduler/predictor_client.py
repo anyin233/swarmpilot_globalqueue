@@ -24,18 +24,48 @@ Usage:
     )
 """
 
+from math import e
 import httpx
 import os
 from typing import Dict, Any, Optional, List
 from loguru import logger
+import json
+import numpy as np
 
 from .models import (
     PredictSingleRequest,
     PredictSingleResponse,
     PredictBatchRequest,
     PredictBatchResponse,
-    PredictionResult
+    PredictionResult,
+    ModelInfo,
+    PredictionSummary
 )
+
+def calculate_moments(p, q):
+    """
+    p: 分位数水平数组
+    q: 对应的分位数值数组
+    """
+    # 内部区间的贡献（使用梯形法则）
+    E_X = np.trapezoid(q, p)
+    E_X2 = np.trapezoid(q**2, p)
+    
+    # 如果p不包含0和1，处理尾部
+    if p[0] > 0:
+        # 简单假设：左尾与第一个区间的斜率相同
+        E_X += q[0] * p[0]
+        E_X2 += q[0]**2 * p[0]
+    
+    if p[-1] < 1:
+        # 简单假设：右尾与最后一个区间的斜率相同
+        E_X += q[-1] * (1 - p[-1])
+        E_X2 += q[-1]**2 * (1 - p[-1])
+    
+    variance = E_X2 - E_X**2
+    std = np.sqrt(variance)
+    
+    return E_X, variance, std
 
 
 class PredictorClient:
@@ -68,7 +98,7 @@ class PredictorClient:
         ...     print(f"Expected time: {response.results.expect}ms")
     """
 
-    def __init__(self, base_url: str, timeout: float = 30.0):
+    def __init__(self, base_url: str, timeout: float = 30.0, fake_data_bypass=False, fake_data_path=None):
         """
         Initialize Predictor client
 
@@ -84,6 +114,72 @@ class PredictorClient:
         self.use_fake_predictor = os.getenv("USE_FAKE_PREDICTOR", "false").lower() in ("true", "1", "yes")
         self.fake_predictor_url = os.getenv("FAKE_PREDICTOR_URL", "http://localhost:8200")
         
+        if fake_data_bypass:
+            assert fake_data_bypass, "When you want to use fake data, please set the path of the data"
+            try:
+                all_fake_data = os.listdir(fake_data_path)
+                self.fake_data_mapping = {}
+                self.fake_precentile = [0.01, 0.05, 0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90, 0.95, 0.98, 0.99, 0.995]
+                
+                for data_name in all_fake_data:
+                    if not data_name.endswith(".json"):
+                        continue
+                    data_file_path = os.path.join(fake_data_path, data_name)
+                    with open(data_file_path, 'r') as f:
+                        fake_data = json.load(f)
+                    model_name = data_name[:-5]
+                    self.fake_data_mapping[model_name] = fake_data
+                    logger.info(f"Fake data of {model_name} is load from {data_name}")
+                
+                
+                # Pre-compute precentile of each data
+                self.fake_data_statics = {}
+                for data_name, fake_data in self.fake_data_mapping.items():
+                    if isinstance(fake_data, list):
+                        quantile_predictions = np.percentile(fake_data, [q * 100 for q in self.fake_precentile])
+                        exp, var, std = calculate_moments(np.array(self.fake_precentile), quantile_predictions)
+                        self.fake_data_statics[data_name] =  {
+                                    "quantile": quantile_predictions.tolist(),
+                                    "quantile_set": self.fake_precentile,
+                                    "expect": float(exp),
+                                    "variance": float(var),
+                                    "standard": float(std)
+                                }
+                    elif isinstance(fake_data, dict):
+                        cur_fake_data_statics = {}
+                        for key, fake_data_list in fake_data.items():
+                            quantile_predictions = np.percentile(fake_data_list, [q * 100 for q in self.fake_precentile])
+                            exp, var, std = calculate_moments(np.array(self.fake_precentile), quantile_predictions)
+                            # Convert key to float or tuple of floats for dictionary lookup
+                            if isinstance(key, list):
+                                new_key = tuple(float(v) for v in key)  # Multi-value keys as tuple
+                            elif isinstance(key, str):
+                                # Try to convert string keys to float
+                                try:
+                                    new_key = float(key)
+                                except ValueError:
+                                    new_key = key  # Keep as string if not numeric
+                            else:
+                                new_key = float(key)
+                            cur_fake_data_statics[new_key] = {
+                                    "quantile": quantile_predictions.tolist(),
+                                    "quantile_set": self.fake_precentile,
+                                    "expect": float(exp),
+                                    "variance": float(var),
+                                    "standard": float(std)
+                                }
+                        self.fake_data_statics[data_name] = cur_fake_data_statics
+                    else:
+                        raise RuntimeError("Un-supported fake data format")
+                        
+                self.fake_data_enabled = True
+            except Exception as e:
+                logger.error(f"Cannot load fake data: {e}")
+                exit(-1) # Cannot load fake data under fake data model, exit with error!
+            logger.info("Fake data model enabled")
+        else:
+            self.fake_data_enabled = False
+
         if self.use_fake_predictor:
             logger.info(
                 f"Initialized PredictorClient with base_url={self.base_url}, "
@@ -159,6 +255,95 @@ class PredictorClient:
             >>> if response.results.status == "success":
             ...     print(f"Expected time: {response.results.expect}ms ± {response.results.error}ms")
         """
+        
+        if self.fake_data_enabled:
+            # Bypass real predictor with fake data(pre-computed data)
+            # Step 1: Extract real model name
+            if model_name.startswith("fake_"):
+                stripped_model_name = model_name[5:]
+            else: 
+                stripped_model_name = model_name
+               
+            
+            # Step 2: Check if fake data exists
+            if stripped_model_name in self.fake_data_mapping:
+                # Step 3: Oh, we have fake data, let's go
+                cur_model_statics = self.fake_data_statics.get(stripped_model_name)
+                target_statics = None
+                if cur_model_statics:
+                    # Check if this is a statistics dict (list format model) or feature-keyed dict
+                    if isinstance(cur_model_statics, dict) and "quantile" in cur_model_statics:
+                        # This is simple list format - statistics are directly available
+                        target_statics = cur_model_statics
+                    elif isinstance(cur_model_statics, dict):
+                        # This is dict format with feature keys - need to lookup by input_feature
+                        # Parse input_feature as list of dicts
+                        input_feature = trace.get('input_feature', [])
+                        if isinstance(input_feature, dict):
+                            # Handle dict format: {"param_name": value, ...}
+                            key = [float(v) for v in input_feature.values()]
+                        elif isinstance(input_feature, list):
+                            # Handle list format: [{"param_name": "...", "val": value}, ...]
+                            key = [float(item['val']) for item in input_feature]
+                        else:
+                            key = []
+
+                        # Convert to appropriate key type for dictionary lookup
+                        if len(key) == 1:
+                            lookup_key = key[0]
+                        elif len(key) > 1:
+                            lookup_key = tuple(key)  # Multi-value keys must be tuples
+                        else:
+                            lookup_key = None
+
+                        target_statics = cur_model_statics.get(lookup_key) if lookup_key is not None else None
+                        if target_statics is None:
+                            logger.warning(f"Warning: No fake data for key {key} in model {stripped_model_name}, fallback to external predictor")
+                        else:
+                            logger.debug(f"Using fake data for model {stripped_model_name} with key {key}")
+
+                    # Return fake data result immediately
+                    if target_statics:
+                        logger.info(f"Fake data bypass: returning pre-computed stats for {stripped_model_name}")
+
+                        # Construct ModelInfo
+                        model_info = ModelInfo(
+                            type=model_type,
+                            name=model_name,
+                            hardware=hardware,
+                            software_name=software_name,
+                            software_version=software_version
+                        )
+
+                        # Construct PredictionResult
+                        prediction_result = PredictionResult(
+                            status="success",
+                            quantile_predictions=target_statics["quantile"],
+                            quantiles=target_statics["quantile_set"],
+                            model_info=model_info,
+                            expect=target_statics["expect"],
+                            error=target_statics["standard"]
+                        )
+
+                        # Construct PredictionSummary
+                        prediction_summary = PredictionSummary(
+                            total=1,
+                            success=1,
+                            failed=0,
+                            confidence_level=confidence_level,
+                            duration_seconds=0.0  # Fake data is instant
+                        )
+
+                        # Return complete response
+                        return PredictSingleResponse(
+                            summary=prediction_summary,
+                            results=prediction_result
+                        )
+                else:
+                    logger.warning(f"Warning: No fake data for model {stripped_model_name}, fallback to external predictor")
+            else:
+                logger.warning(f"Warning: No fake data for model {stripped_model_name}, fallback to external predictor")
+        
         # Build request body
         request_body = PredictSingleRequest(
             trace=trace,
