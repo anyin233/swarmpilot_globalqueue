@@ -27,12 +27,23 @@ from ..predictor_client import PredictorClient
 
 
 @dataclass
+class TaskPrediction:
+    """Single task prediction information cache"""
+    task_id: str
+    expected_ms: float
+    error_ms: float
+    enqueue_time: float
+
+
+@dataclass
 class QueueState:
     """Local queue state tracking for scheduler-side prediction"""
     expected_ms: float = 0.0
     error_ms: float = 0.0
     last_update_time: float = field(default_factory=time.time)
     task_count: int = 0
+    # Pending tasks prediction cache for error recalculation
+    pending_tasks: Dict[str, TaskPrediction] = field(default_factory=dict)
 
 
 class ShortestQueueStrategy(BaseStrategy):
@@ -51,6 +62,7 @@ class ShortestQueueStrategy(BaseStrategy):
         taskinstances: List[TaskInstance],
         predictor_url: str = "http://localhost:8100",
         predictor_timeout: float = 10.0,
+        error_recalc_threshold: float = 2.0,
         debug_log_path: Optional[str] = None,
         get_debug_enabled: Optional[Callable[[], bool]] = None
     ):
@@ -61,12 +73,15 @@ class ShortestQueueStrategy(BaseStrategy):
             taskinstances: List of available TaskInstances
             predictor_url: URL of the Predictor service
             predictor_timeout: Timeout for predictor requests in seconds
+            error_recalc_threshold: Error recalculation threshold (default: 2.0)
+                When error_ms > threshold * expected_ms, trigger recalculation
             debug_log_path: Path to debug log file (default: "./shortest_queue_debug.jsonl")
             get_debug_enabled: Callable to check if debug logging is enabled
         """
         super().__init__(taskinstances)
         self.predictor_url = predictor_url
         self.predictor_timeout = predictor_timeout
+        self.error_recalc_threshold = error_recalc_threshold
 
         # Track queue state for each TaskInstance
         self.queue_states: Dict[UUID, QueueState] = {}
@@ -268,8 +283,18 @@ class ShortestQueueStrategy(BaseStrategy):
                         f"expected={task_expected:.2f}ms, error={task_error:.2f}ms"
                     )
 
-            # Update queue state using error propagation
+            # Cache task prediction information for error recalculation
+            task_id = enqueue_response.task_id
             queue_state = self.queue_states[selected_instance.uuid]
+
+            queue_state.pending_tasks[task_id] = TaskPrediction(
+                task_id=task_id,
+                expected_ms=task_expected,
+                error_ms=task_error,
+                enqueue_time=enqueue_response.enqueue_time
+            )
+
+            # Update queue state using error propagation
             new_expected = queue_state.expected_ms + task_expected
             new_error = sqrt(queue_state.error_ms ** 2 + task_error ** 2)
 
@@ -308,24 +333,76 @@ class ShortestQueueStrategy(BaseStrategy):
             logger.error(f"Failed to update queue state: {e}", exc_info=True)
 
     def update_queue_on_completion(self, instance_uuid: UUID, task_id: str, execution_time: float):
-        """Update queue state when task completes"""
+        """
+        Update queue state when task completes with error recalculation
+
+        This method:
+        1. Removes completed task from pending_tasks cache
+        2. Subtracts actual execution time from expected_ms
+        3. Checks if error ratio exceeds threshold
+        4. If yes, recalculates queue state from remaining pending tasks
+        """
         if instance_uuid not in self.queue_states:
             logger.warning(f"Received completion for unknown instance {instance_uuid}")
             return
 
         queue_state = self.queue_states[instance_uuid]
         old_expected = queue_state.expected_ms
+        old_error = queue_state.error_ms
 
-        # Subtract actual execution time
+        # Step 1: Remove completed task from cache (for recalculation)
+        if task_id in queue_state.pending_tasks:
+            queue_state.pending_tasks.pop(task_id)
+            logger.debug(f"Removed task {task_id} from pending_tasks cache")
+        else:
+            logger.warning(
+                f"Task {task_id} not found in pending_tasks cache for instance {instance_uuid}"
+            )
+
+        # Step 2: Subtract actual execution time (maintain current behavior)
         new_expected = max(0.0, old_expected - execution_time)
         queue_state.expected_ms = new_expected
         queue_state.task_count = max(0, queue_state.task_count - 1)
-        queue_state.last_update_time = time.time()
 
-        logger.info(
-            f"Updated queue state on completion for instance {instance_uuid}: "
-            f"{old_expected:.2f}ms -> {new_expected:.2f}ms (subtracted {execution_time:.2f}ms)"
+        # Step 3: Check if error recalculation is needed
+        should_recalculate = (
+            queue_state.expected_ms > 0 and
+            old_error > self.error_recalc_threshold * queue_state.expected_ms
         )
+
+        if should_recalculate:
+            logger.warning(
+                f"High error ratio detected for instance {instance_uuid}: "
+                f"error={old_error:.2f}ms > {self.error_recalc_threshold}×expected={queue_state.expected_ms:.2f}ms. "
+                f"Triggering queue state recalculation from {len(queue_state.pending_tasks)} pending tasks."
+            )
+
+            # Step 4: Recalculate from pending tasks
+            recalculated_expected = 0.0
+            recalculated_variance = 0.0
+
+            for pending_task in queue_state.pending_tasks.values():
+                recalculated_expected += pending_task.expected_ms
+                recalculated_variance += pending_task.error_ms ** 2
+
+            # Override current values with recalculated ones
+            queue_state.expected_ms = recalculated_expected
+            queue_state.error_ms = sqrt(recalculated_variance) if recalculated_variance > 0 else 0.0
+
+            logger.info(
+                f"Recalculated queue state for instance {instance_uuid}: "
+                f"expected={old_expected:.2f}ms -> {queue_state.expected_ms:.2f}ms (recalculated from pending tasks), "
+                f"error={old_error:.2f}ms -> {queue_state.error_ms:.2f}ms, "
+                f"tasks={queue_state.task_count}"
+            )
+        else:
+            logger.info(
+                f"Updated queue state on completion for instance {instance_uuid}: "
+                f"expected={old_expected:.2f}ms -> {new_expected:.2f}ms (subtracted {execution_time:.2f}ms), "
+                f"error={old_error:.2f}ms, tasks={queue_state.task_count}"
+            )
+
+        queue_state.last_update_time = time.time()
 
     @staticmethod
     def _compute_distribution_summary(quantiles: Dict[str, float]) -> Optional[Dict[str, Optional[float]]]:

@@ -25,6 +25,7 @@ Usage:
 """
 
 import httpx
+import os
 from typing import Dict, Any, Optional, List
 from loguru import logger
 
@@ -78,7 +79,19 @@ class PredictorClient:
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
         self.client = httpx.Client(timeout=timeout)
-        logger.info(f"Initialized PredictorClient with base_url={self.base_url}")
+        
+        # Fake predictor configuration
+        self.use_fake_predictor = os.getenv("USE_FAKE_PREDICTOR", "false").lower() in ("true", "1", "yes")
+        self.fake_predictor_url = os.getenv("FAKE_PREDICTOR_URL", "http://localhost:8200")
+        
+        if self.use_fake_predictor:
+            logger.info(
+                f"Initialized PredictorClient with base_url={self.base_url}, "
+                f"fake_predictor_url={self.fake_predictor_url}, "
+                f"use_fake_predictor=True"
+            )
+        else:
+            logger.info(f"Initialized PredictorClient with base_url={self.base_url}")
 
     def __enter__(self):
         """Context manager support"""
@@ -154,11 +167,19 @@ class PredictorClient:
             lookup_table_name=lookup_table_name
         )
 
-        # Build URL with path parameters
-        url = (
-            f"{self.base_url}/predict/single/{model_type}/{model_name}/"
-            f"{hardware}/{software_name}/{software_version}"
-        )
+        # Check if we should route to fake predictor
+        if self.use_fake_predictor and model_name.startswith("fake_"):
+            # Strip fake_ prefix from model name
+            stripped_model_name = model_name[5:]  # Remove "fake_"
+            # Use fake predictor URL pattern
+            url = f"{self.fake_predictor_url}/predict/single/fake/{stripped_model_name}/fake/fake/fake"
+            logger.debug(f"Routing to fake predictor: {url}")
+        else:
+            # Build URL with path parameters for normal predictor
+            url = (
+                f"{self.base_url}/predict/single/{model_type}/{model_name}/"
+                f"{hardware}/{software_name}/{software_version}"
+            )
 
         try:
             response = self.client.post(
@@ -263,11 +284,22 @@ class PredictorClient:
         metadata = metadata or {}
 
         # Extract required parameters from metadata
-        model_name = metadata.get("model_name")
-        model_type = metadata.get("model_type")
+        # Use model_type parameter as default model_name if not in metadata
+        model_name = metadata.get("model_name") or model_type
+        extracted_model_type = metadata.get("model_type") or model_type
         hardware = metadata.get("hardware")
         software_name = metadata.get("software_name")
         software_version = metadata.get("software_version")
+
+        # For models with fake_ prefix, automatically set hardware, software_name, and software_version to "fake"
+        if model_name and model_name.startswith("fake_"):
+            hardware = "fake"
+            software_name = "fake"
+            software_version = "fake"
+            logger.debug(
+                f"Model {model_name} has fake_ prefix, "
+                f"automatically setting hardware=fake, software_name=fake, software_version=fake"
+            )
 
         # Validate required fields
         if not hardware:
@@ -307,7 +339,7 @@ class PredictorClient:
 
         # Call predict_single
         return self.predict_single(
-            model_type=model_type,
+            model_type=extracted_model_type,
             model_name=model_name,
             hardware=hardware,
             software_name=software_name,

@@ -9,4 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
+# Test files
+test_*.py
+tests/
+
+# Debug and log files
+*.jsonl
+*.log
+
 task_instances.yaml
