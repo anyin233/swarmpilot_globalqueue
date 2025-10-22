@@ -25,6 +25,7 @@ class InstanceStatus(str, Enum):
 
 class TaskStatus(str, Enum):
     """Task status enumeration"""
+    PENDING = "pending"  # In local queue, not yet scheduled
     QUEUED = "queued"
     SCHEDULED = "scheduled"
     COMPLETED = "completed"
@@ -118,6 +119,7 @@ class SchedulerRequest(BaseModel):
     input_data: Dict[str, Any]
     metadata: Dict[str, Any] = {}
     request_id: Optional[str] = None
+    task_id: Optional[str] = None  # Optional pre-assigned task ID (preserved if UUID-compliant)
 
 
 class SchedulerResponse(BaseModel):
@@ -185,6 +187,7 @@ class QueueSubmitRequest(BaseModel):
     model_name: str = Field(..., description="Target model name")
     task_input: Dict[str, Any] = Field(..., description="Task information submitted to Task Instance")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata submitted to Predictor for predicting model execution time distribution")
+    task_id: Optional[str] = Field(None, description="Optional task ID (if UUID-compliant, will be preserved)")
 
 
 class QueueSubmitResponse(BaseModel):
@@ -196,6 +199,49 @@ class QueueSubmitResponse(BaseModel):
     status: str = Field(..., description="success or error")
     task_id: str = Field(..., description="Submitted task ID")
     scheduled_ti: str = Field(..., description="UUID of Task Instance scheduled to")
+
+
+class BatchTaskItem(BaseModel):
+    """
+    Single task item for batch submission
+    """
+    task_input: Dict[str, Any] = Field(..., description="Task information for this task")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata for this task")
+
+
+class QueueBatchSubmitRequest(BaseModel):
+    """
+    /queue/submit_batch - Submit multiple tasks in batch
+
+    Allows submitting multiple tasks at once for the same model
+    """
+    model_name: str = Field(..., description="Target model name for all tasks")
+    tasks: List[BatchTaskItem] = Field(..., description="List of tasks to submit")
+
+
+class BatchTaskResult(BaseModel):
+    """
+    Result for a single task in batch submission
+    """
+    index: int = Field(..., description="Index of this task in the batch (0-based)")
+    status: str = Field(..., description="success or error for this specific task")
+    task_id: Optional[str] = Field(None, description="Task ID if submission succeeded")
+    scheduled_ti: Optional[str] = Field(None, description="UUID of Task Instance if scheduled")
+    error: Optional[str] = Field(None, description="Error message if submission failed")
+
+
+class QueueBatchSubmitResponse(BaseModel):
+    """
+    /queue/submit_batch - Batch submission response
+
+    Returns results for all submitted tasks
+    """
+    status: str = Field(..., description="overall status: success if all succeeded, partial if some failed, error if all failed")
+    message: str = Field(..., description="Summary message")
+    total_tasks: int = Field(..., description="Total number of tasks in batch")
+    successful_tasks: int = Field(..., description="Number of successfully submitted tasks")
+    failed_tasks: int = Field(..., description="Number of failed task submissions")
+    results: List[BatchTaskResult] = Field(..., description="Individual results for each task")
 
 
 class QueueInfoItem(BaseModel):

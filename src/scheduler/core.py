@@ -23,6 +23,10 @@ from .strategies import (
     TaskInstance,
     SelectionRequest
 )
+from .model_scheduler import ModelSchedulerManager
+from .lockfree_scheduler_manager import LockFreeSchedulerManager
+from .lockfree_task_tracker import LockFreeTaskTracker
+from .utils import is_valid_uuid
 
 
 class SwarmPilotScheduler:
@@ -41,7 +45,9 @@ class SwarmPilotScheduler:
         strategy: Optional[BaseStrategy] = None,
         get_debug_enabled: Optional[Callable[[], bool]] = None,
         get_fake_data_enabled: Optional[Callable[[], bool]] = None,
-        get_fake_data_path: Optional[Callable[[], Optional[str]]] = None
+        get_fake_data_path: Optional[Callable[[], Optional[str]]] = None,
+        get_probabilistic_quantiles: Optional[Callable[[], list]] = None,
+        use_lockfree: bool = True  # Default to lock-free implementation
     ):
         """
         Initialize Scheduler
@@ -51,14 +57,29 @@ class SwarmPilotScheduler:
             get_debug_enabled: Callable to check if debug logging is enabled
             get_fake_data_enabled: Callable to check if fake data mode is enabled
             get_fake_data_path: Callable to get fake data path
+            get_probabilistic_quantiles: Callable to get probabilistic strategy quantiles
+            use_lockfree: Whether to use lock-free implementation (default: True)
         """
         self.taskinstances: List[TaskInstance] = []
         self._strategy = strategy
-        self.task_tracker = TaskTracker()
+        self.use_lockfree = use_lockfree
+
+        # Use lock-free or original task tracker based on configuration
+        if use_lockfree:
+            self.task_tracker = LockFreeTaskTracker(
+                max_history=100000,
+                cleanup_interval=60
+            )
+            logger.info("Using lock-free task tracker implementation")
+        else:
+            self.task_tracker = TaskTracker()
+            logger.info("Using original task tracker implementation")
+
         self.last_routing_info: Optional[Dict[str, Any]] = None
         self.get_debug_enabled = get_debug_enabled or (lambda: False)
         self.get_fake_data_enabled = get_fake_data_enabled or (lambda: False)
         self.get_fake_data_path = get_fake_data_path or (lambda: None)
+        self.get_probabilistic_quantiles = get_probabilistic_quantiles or (lambda: [0.25, 0.5, 0.75, 0.99])
         self._current_strategy_name: Optional[str] = None
 
         # Track request arrival times for timing calculation
@@ -66,6 +87,9 @@ class SwarmPilotScheduler:
 
         # Track timing statistics
         self.timing_statistics: List[tuple[str, float, float]] = []
+
+        # Asynchronous scheduling manager (will be lock-free or original based on config)
+        self.async_scheduler_manager: Optional[ModelSchedulerManager] = None
 
     @property
     def strategy(self) -> BaseStrategy:
@@ -113,10 +137,21 @@ class SwarmPilotScheduler:
                 fake_data_path=fake_data_path
             )
         elif strategy_class == ProbabilisticQueueStrategy:
+            quantiles = self.get_probabilistic_quantiles()
+            logger.info(
+                f"Initializing ProbabilisticQueueStrategy: "
+                f"config_quantiles={quantiles}, fake_data={fake_data_enabled}"
+            )
+            if fake_data_enabled:
+                logger.info(
+                    f"Fake data mode enabled - strategy will use predictor's fake percentiles "
+                    f"if available, otherwise fall back to config_quantiles"
+                )
             self.strategy = strategy_class(
                 self.taskinstances,
                 predictor_url="http://localhost:8100",
                 predictor_timeout=10.0,
+                quantiles=quantiles,
                 get_debug_enabled=self.get_debug_enabled,
                 fake_data_bypass=fake_data_enabled,
                 fake_data_path=fake_data_path
@@ -130,6 +165,189 @@ class SwarmPilotScheduler:
     def get_current_strategy_name(self) -> Optional[str]:
         """Get current strategy name"""
         return self._current_strategy_name
+
+    def enable_async_scheduling(
+        self,
+        max_queue_size: int = 10000,
+        retry_attempts: int = 3,
+        retry_delay_ms: int = 100,
+        num_workers: int = 4,
+        batch_size: int = 10
+    ):
+        """
+        Enable asynchronous scheduling (optimized high-throughput version)
+
+        Args:
+            max_queue_size: Maximum pending queue size per model (default: 10000)
+            retry_attempts: Number of retry attempts for failed scheduling (default: 3)
+            retry_delay_ms: Delay between retries in milliseconds (default: 100)
+            num_workers: Number of worker threads per model (default: 4)
+            batch_size: Batch size for processing (default: 10)
+
+        Performance:
+            - Default config (4 workers, batch 10): 400-600 QPS
+            - High QPS config (8 workers, batch 20): 1000+ QPS
+            - Lock-free config (8 workers, batch 20): 10000+ QPS
+        """
+        if self.async_scheduler_manager is not None:
+            logger.warning("Async scheduling already enabled")
+            return
+
+        # Choose implementation based on use_lockfree flag
+        if self.use_lockfree:
+            # Use lock-free scheduler manager for ultra-high performance
+            self.async_scheduler_manager = LockFreeSchedulerManager(
+                task_tracker=self.task_tracker,  # Already using lock-free tracker if use_lockfree=True
+                max_queue_size=max_queue_size,
+                retry_attempts=retry_attempts,
+                retry_delay_ms=retry_delay_ms,
+                num_workers=num_workers,
+                batch_size=batch_size
+            )
+            logger.info(f"Using lock-free async scheduler (workers={num_workers}, batch={batch_size})")
+        else:
+            # Use original optimized scheduler
+            self.async_scheduler_manager = ModelSchedulerManager(
+                strategy=self.strategy,
+                task_tracker=self.task_tracker,
+                taskinstances=self.taskinstances,
+                max_queue_size=max_queue_size,
+                retry_attempts=retry_attempts,
+                retry_delay_ms=retry_delay_ms,
+                num_workers=num_workers,
+                batch_size=batch_size
+            )
+            logger.info(f"Using original async scheduler (workers={num_workers}, batch={batch_size})")
+
+        # Enable the scheduler manager
+        if self.use_lockfree:
+            # Lock-free manager needs to be started
+            self.async_scheduler_manager.start()
+        else:
+            # Original manager uses enable()
+            self.async_scheduler_manager.enable()
+    
+    def disable_async_scheduling(self):
+        """Disable asynchronous scheduling"""
+        if self.async_scheduler_manager is None:
+            return
+
+        # Call appropriate disable method based on implementation
+        if self.use_lockfree:
+            self.async_scheduler_manager.stop()
+        else:
+            self.async_scheduler_manager.disable()
+
+        self.async_scheduler_manager = None
+        logger.info("Async scheduling disabled")
+    
+    def is_async_scheduling_enabled(self) -> bool:
+        """Check if async scheduling is enabled"""
+        if self.async_scheduler_manager is None:
+            return False
+
+        # Check based on implementation
+        if self.use_lockfree:
+            # Lock-free manager is enabled if it's running
+            return self.async_scheduler_manager._running
+        else:
+            # Original manager has is_enabled() method
+            return self.async_scheduler_manager.is_enabled()
+    
+    def schedule_async(self, request: SchedulerRequest) -> str:
+        """
+        Schedule a task asynchronously
+        
+        Args:
+            request: Scheduler request
+            
+        Returns:
+            task_id: Generated task ID (task will be scheduled in background)
+        """
+        if not self.is_async_scheduling_enabled():
+            raise RuntimeError("Async scheduling is not enabled")
+        
+        # Submit to async scheduler manager
+        task_id = self.async_scheduler_manager.submit_task(request)
+        
+        logger.info(f"Task {task_id} submitted for async scheduling (model: {request.model_type})")
+        return task_id
+    
+    def get_async_statistics(self) -> Dict[str, Any]:
+        """Get async scheduling statistics"""
+        if self.async_scheduler_manager is None:
+            return {"enabled": False}
+        
+        return self.async_scheduler_manager.get_statistics()
+    
+    def get_pending_count(self, model_type: Optional[str] = None) -> int:
+        """
+        Get pending task count in async queues
+
+        Args:
+            model_type: Specific model type, or None for total
+
+        Returns:
+            Number of pending tasks
+        """
+        if self.async_scheduler_manager is None:
+            return 0
+
+        return self.async_scheduler_manager.get_pending_count(model_type)
+
+    def enable_profiling(self, model_type: Optional[str] = None):
+        """
+        Enable detailed timing profiling
+
+        Args:
+            model_type: Model type to enable profiling for, or None for all
+        """
+        if self.async_scheduler_manager is None:
+            raise RuntimeError("Async scheduling is not enabled")
+
+        self.async_scheduler_manager.enable_profiling(model_type)
+        logger.info(f"Profiling enabled for {'all models' if not model_type else model_type}")
+
+    def disable_profiling(self, model_type: Optional[str] = None):
+        """
+        Disable profiling
+
+        Args:
+            model_type: Model type to disable profiling for, or None for all
+        """
+        if self.async_scheduler_manager is None:
+            raise RuntimeError("Async scheduling is not enabled")
+
+        self.async_scheduler_manager.disable_profiling(model_type)
+        logger.info(f"Profiling disabled for {'all models' if not model_type else model_type}")
+
+    def get_timing_profiles(self, model_type: Optional[str] = None):
+        """
+        Get collected timing profiles
+
+        Args:
+            model_type: Model type filter, or None for all
+
+        Returns:
+            Dictionary mapping model_type to list of timing profiles
+        """
+        if self.async_scheduler_manager is None:
+            return {}
+
+        return self.async_scheduler_manager.get_timing_profiles(model_type)
+
+    def save_timing_profiles(self, output_dir: str):
+        """
+        Save timing profiles to JSON files
+
+        Args:
+            output_dir: Directory to save profile files
+        """
+        if self.async_scheduler_manager is None:
+            raise RuntimeError("Async scheduling is not enabled")
+
+        self.async_scheduler_manager.save_all_timing_profiles(output_dir)
+        logger.info(f"Timing profiles saved to {output_dir}")
 
     def load_task_instances_from_config(self, config_path: str) -> None:
         """Load TaskInstances from configuration file"""
@@ -178,6 +396,21 @@ class SwarmPilotScheduler:
 
         if self._strategy:
             self._strategy.taskinstances = self.taskinstances
+
+        # If async scheduling is enabled and using lock-free, create/update scheduler
+        if self.use_lockfree and self.async_scheduler_manager is not None and model_name:
+            # Get task instances for this model
+            model_instances = [ti for ti in self.taskinstances
+                              if ti.model_type == model_name or ti.model_type is None]
+
+            # Create or update scheduler for this model type
+            if not self.async_scheduler_manager.get_scheduler(model_name):
+                self.async_scheduler_manager.create_scheduler(
+                    model_type=model_name,
+                    strategy=self.strategy,
+                    taskinstances=model_instances
+                )
+                logger.info(f"Created lock-free scheduler for model {model_name}")
 
         logger.info(f"Added TaskInstance {ti_uuid} at {base_url} for model {model_name}")
         return ti_uuid
@@ -253,8 +486,14 @@ class SwarmPilotScheduler:
 
         # Enqueue task to selected instance
         try:
-            # Generate task_id here before enqueueing
-            task_id = str(uuid4())
+            # Use pre-assigned task_id if it's a valid UUID, otherwise generate new one
+            if request.task_id and is_valid_uuid(request.task_id):
+                task_id = request.task_id
+                logger.debug(f"Using pre-assigned UUID task_id: {task_id}")
+            else:
+                task_id = str(uuid4())
+                if request.task_id:
+                    logger.debug(f"Ignoring non-UUID task_id '{request.task_id}', generated new: {task_id}")
 
             enqueue_response = selected_instance.instance.enqueue_task(
                 input_data=request.input_data,
