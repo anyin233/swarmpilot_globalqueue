@@ -351,7 +351,7 @@ class LockFreeModelScheduler:
         try:
             while not self._stop_event.is_set():
                 # Get batch from lock-free queue
-                batch = self.pending_queue.get_batch(self.batch_size, timeout=0.1)
+                batch = self.pending_queue.get_batch(self.batch_size, timeout=0.01)
 
                 if not batch:
                     continue

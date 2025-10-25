@@ -391,6 +391,7 @@ class ResultSubmitRequest(BaseModel):
     execution_time: float = Field(..., description="Execution time in milliseconds")
     result: Dict[str, Any] = Field(..., description="Task execution result")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    replica_id: Optional[str] = Field(None, description="Replica ID that executed the task")
 
 
 class ResultSubmitResponse(BaseModel):

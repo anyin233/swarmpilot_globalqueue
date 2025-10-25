@@ -10,6 +10,9 @@ from typing import Dict, Any, List, Optional, Callable
 from uuid import uuid4, UUID
 import yaml
 import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, Future
+import threading
 
 from .client import TaskInstanceClient
 from .task_tracker import TaskTracker
@@ -90,6 +93,16 @@ class SwarmPilotScheduler:
 
         # Asynchronous scheduling manager (will be lock-free or original based on config)
         self.async_scheduler_manager: Optional[ModelSchedulerManager] = None
+
+        # Cache for instance_id to UUID mapping to avoid expensive lookups
+        # Format: {instance_id: uuid}
+        self._instance_id_to_uuid: Dict[str, UUID] = {}
+
+        # Reference to result submission manager (will be injected from api.py)
+        self.result_submission_manager = None
+
+        # Thread pool for parallel task dispatch and queue updates
+        self.executor = ThreadPoolExecutor(max_workers=4)
 
     @property
     def strategy(self) -> BaseStrategy:
@@ -362,15 +375,42 @@ class SwarmPilotScheduler:
                 host = instance_config.get('host', 'localhost')
                 port = instance_config.get('port', 8100)
                 base_url = f"http://{host}:{port}"
+                model_name = instance_config.get('model_name')  # Optional model_name from config
             else:
                 base_url = instance_config
+                model_name = None
 
             ti_uuid = uuid4()
             client = TaskInstanceClient(base_url)
-            task_instance = TaskInstance(uuid=ti_uuid, instance=client)
+
+            # Fetch status once during loading to cache model_type and instance_id
+            instance_id_cached = None
+            actual_model_type = model_name  # Use config model_name as fallback
+
+            try:
+                status = client.get_status()
+                if status.instance_id:
+                    instance_id_cached = status.instance_id
+                    self._instance_id_to_uuid[status.instance_id] = ti_uuid
+                    logger.debug(f"Cached instance_id mapping: {status.instance_id} -> {ti_uuid}")
+
+                # Use actual model_type from status if available
+                if status.model_type:
+                    actual_model_type = status.model_type
+                    logger.debug(f"Cached model_type: {status.model_type}")
+            except Exception as e:
+                logger.warning(f"Could not get instance info for caching during config loading: {e}")
+
+            # Create TaskInstance with cached information
+            task_instance = TaskInstance(
+                uuid=ti_uuid,
+                instance=client,
+                model_type=actual_model_type,
+                instance_id=instance_id_cached
+            )
 
             self.taskinstances.append(task_instance)
-            logger.info(f"Loaded TaskInstance {ti_uuid} from {base_url}")
+            logger.info(f"Loaded TaskInstance {ti_uuid} from {base_url} (model: {actual_model_type})")
 
         if self._strategy:
             self._strategy.taskinstances = self.taskinstances
@@ -390,7 +430,32 @@ class SwarmPilotScheduler:
         """
         ti_uuid = uuid4()
         client = TaskInstanceClient(base_url)
-        task_instance = TaskInstance(uuid=ti_uuid, instance=client, model_type=model_name)
+
+        # Fetch status once during registration to cache model_type and instance_id
+        instance_id_cached = None
+        actual_model_type = model_name  # Use provided model_name as fallback
+
+        try:
+            status = client.get_status()
+            if status.instance_id:
+                instance_id_cached = status.instance_id
+                self._instance_id_to_uuid[status.instance_id] = ti_uuid
+                logger.debug(f"Cached instance_id mapping: {status.instance_id} -> {ti_uuid}")
+
+            # Use actual model_type from status if available
+            if status.model_type:
+                actual_model_type = status.model_type
+                logger.debug(f"Cached model_type: {status.model_type}")
+        except Exception as e:
+            logger.warning(f"Could not get instance info for caching during registration: {e}")
+
+        # Create TaskInstance with cached information
+        task_instance = TaskInstance(
+            uuid=ti_uuid,
+            instance=client,
+            model_type=actual_model_type,
+            instance_id=instance_id_cached
+        )
 
         self.taskinstances.append(task_instance)
 
@@ -419,7 +484,17 @@ class SwarmPilotScheduler:
         """Remove a TaskInstance by UUID"""
         for i, ti in enumerate(self.taskinstances):
             if ti.uuid == instance_uuid:
-                self.taskinstances.pop(i)
+                removed_ti = self.taskinstances.pop(i)
+
+                # Remove from instance_id cache
+                try:
+                    status = removed_ti.instance.get_status()
+                    if status.instance_id and status.instance_id in self._instance_id_to_uuid:
+                        del self._instance_id_to_uuid[status.instance_id]
+                        logger.debug(f"Removed instance_id mapping from cache: {status.instance_id}")
+                except Exception as e:
+                    logger.debug(f"Could not remove instance_id from cache: {e}")
+
                 logger.info(f"Removed TaskInstance {instance_uuid}")
                 return True
 
@@ -444,6 +519,15 @@ class SwarmPilotScheduler:
             if ti.instance.base_url == target_url:
                 removed_ti = self.taskinstances.pop(i)
 
+                # Remove from instance_id cache
+                try:
+                    status = removed_ti.instance.get_status()
+                    if status.instance_id and status.instance_id in self._instance_id_to_uuid:
+                        del self._instance_id_to_uuid[status.instance_id]
+                        logger.debug(f"Removed instance_id mapping from cache: {status.instance_id}")
+                except Exception as e:
+                    logger.debug(f"Could not remove instance_id from cache: {e}")
+
                 # Update strategy's taskinstances reference
                 if self._strategy:
                     self._strategy.taskinstances = self.taskinstances
@@ -453,6 +537,141 @@ class SwarmPilotScheduler:
 
         logger.warning(f"TaskInstance at {target_url} not found")
         return None
+
+    def get_uuid_by_instance_id(self, instance_id: str) -> Optional[UUID]:
+        """
+        Get TaskInstance UUID by instance_id using cache
+
+        Args:
+            instance_id: Instance ID (format: "ti-<port>")
+
+        Returns:
+            UUID if found, None otherwise
+        """
+        # First try cache (fast path)
+        if instance_id in self._instance_id_to_uuid:
+            return self._instance_id_to_uuid[instance_id]
+
+        # Cache miss - do slow lookup and update cache
+        for ti in self.taskinstances:
+            try:
+                status = ti.instance.get_status()
+                if status.instance_id == instance_id:
+                    # Update cache for future lookups
+                    self._instance_id_to_uuid[instance_id] = ti.uuid
+                    logger.debug(f"Cache miss - added instance_id mapping: {instance_id} -> {ti.uuid}")
+                    return ti.uuid
+            except Exception as e:
+                logger.debug(f"Could not get status for instance {ti.uuid}: {e}")
+                continue
+
+        logger.warning(f"Instance ID {instance_id} not found")
+        return None
+
+    async def _dispatch_task_via_websocket(
+        self,
+        instance_id: str,
+        task_id: str,
+        model_name: str,
+        input_data: Dict[str, Any],
+        metadata: Dict[str, Any]
+    ) -> bool:
+        """
+        Dispatch a task to TaskInstance via WebSocket
+
+        Args:
+            instance_id: Target instance identifier (e.g., "localhost:8100")
+            task_id: Unique task identifier
+            model_name: Model name for the task
+            input_data: Task input data
+            metadata: Task metadata
+
+        Returns:
+            True if dispatch successful, False if should fallback to HTTP
+        """
+        if not self.result_submission_manager:
+            logger.debug("ResultSubmissionManager not available, using HTTP fallback")
+            return False
+
+        # Check if WebSocket connection exists
+        if not self.result_submission_manager.has_connection(instance_id):
+            logger.debug(f"No WebSocket connection for {instance_id}, using HTTP fallback")
+            return False
+
+        # Dispatch via WebSocket
+        success = await self.result_submission_manager.dispatch_task(
+            instance_id=instance_id,
+            task_id=task_id,
+            model_name=model_name,
+            task_input=input_data,
+            metadata=metadata
+        )
+
+        if success:
+            logger.info(f"Task {task_id} dispatched to {instance_id} via WebSocket")
+        else:
+            logger.warning(f"WebSocket dispatch failed for task {task_id}, will use HTTP fallback")
+
+        return success
+
+    def _dispatch_task_sync(
+        self,
+        instance_id: str,
+        task_id: str,
+        model_name: str,
+        input_data: Dict[str, Any],
+        metadata: Dict[str, Any],
+        instance_client: TaskInstanceClient
+    ):
+        """
+        Dispatch task with WebSocket (preferred) or HTTP fallback.
+
+        Returns:
+            enqueue_response from TaskInstance
+        """
+        # Try WebSocket first if available
+        use_websocket = False
+        if self.result_submission_manager:
+            try:
+                # Run async websocket dispatch in event loop
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If we're already in an async context, create a task
+                    # This is a workaround for sync context calling async code
+                    logger.debug("Event loop already running, using HTTP fallback")
+                else:
+                    use_websocket = loop.run_until_complete(
+                        self._dispatch_task_via_websocket(
+                            instance_id, task_id, model_name, input_data, metadata
+                        )
+                    )
+            except RuntimeError:
+                # No event loop available, use HTTP fallback
+                logger.debug("No event loop available, using HTTP fallback")
+            except Exception as e:
+                logger.warning(f"WebSocket dispatch error: {e}, using HTTP fallback")
+
+        # If WebSocket succeeded, create a mock response
+        # (actual task is already enqueued via WebSocket)
+        if use_websocket:
+            # Return a mock response since task is already dispatched
+            from .models import EnqueueResponse
+            return EnqueueResponse(
+                status="success",
+                task_id=task_id,
+                message="Task dispatched via WebSocket",
+                queue_size=0,  # Not available via WebSocket
+                expected_completion_time=0.0  # Not available via WebSocket
+            )
+
+        # Fallback to HTTP
+        logger.debug(f"Dispatching task {task_id} to {instance_id} via HTTP")
+        return instance_client.enqueue_task(
+            input_data=input_data,
+            metadata=metadata,
+            task_id=task_id,
+            model_name=model_name
+        )
 
     def schedule(self, request: SchedulerRequest) -> SchedulerResponse:
         """
@@ -484,6 +703,7 @@ class SwarmPilotScheduler:
         selected_instance = result.selected_instance
         queue_info = result.queue_info
 
+        selection_time = time.time()
         # Enqueue task to selected instance
         try:
             # Use pre-assigned task_id if it's a valid UUID, otherwise generate new one
@@ -495,21 +715,17 @@ class SwarmPilotScheduler:
                 if request.task_id:
                     logger.debug(f"Ignoring non-UUID task_id '{request.task_id}', generated new: {task_id}")
 
-            enqueue_response = selected_instance.instance.enqueue_task(
-                input_data=request.input_data,
-                metadata=request.metadata,
-                task_id=task_id,
-                model_name=request.model_type
-            )
+            # Get instance_id for WebSocket dispatch
+            instance_id = selected_instance.instance_id
+            if not instance_id:
+                # Fallback: get instance_id from status call
+                try:
+                    status = selected_instance.instance.get_status()
+                    instance_id = status.get("instance_id")
+                except Exception:
+                    pass
 
-            # Verify task_id consistency
-            if enqueue_response.task_id != task_id:
-                logger.warning(
-                    f"Task ID mismatch: expected {task_id}, got {enqueue_response.task_id}"
-                )
-                task_id = enqueue_response.task_id  # Use the one from TaskInstance
-
-            # Register task in tracker
+            # Register task in tracker (must be done before dispatch)
             self.task_tracker.register_task(
                 task_id=task_id,
                 ti_uuid=selected_instance.uuid,
@@ -523,16 +739,53 @@ class SwarmPilotScheduler:
             # Store arrival time
             self.request_times[task_id] = (arrival_time, request.request_id)
 
-            # Update queue state
-            try:
-                self.strategy.update_queue(
+            # Execute dispatch_task_sync and update_queue in parallel
+            enqueue_response = None
+            update_queue_error = None
+
+            parallel_start_time = time.time()
+            
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit dispatch task
+                dispatch_future = executor.submit(
+                    self._dispatch_task_sync,
+                    instance_id=instance_id,
+                    task_id=task_id,
+                    model_name=request.model_type,
+                    input_data=request.input_data,
+                    metadata=request.metadata,
+                    instance_client=selected_instance.instance
+                )
+
+                # Submit queue update
+                update_future = executor.submit(
+                    self.strategy.update_queue,
                     selected_instance=selected_instance,
                     request=selection_req,
-                    enqueue_response=enqueue_response
+                    task_id=task_id
                 )
-            except Exception as e:
-                logger.warning(f"Failed to update queue state: {e}")
 
+                # Wait for both to complete
+                try:
+                    # Get dispatch result (this is critical, so we wait for it)
+                    enqueue_response = dispatch_future.result()
+                except Exception as e:
+                    # If dispatch fails, this is critical - re-raise the exception
+                    raise e
+
+                # Get queue update result (non-critical, so we just log errors)
+                try:
+                    update_future.result()
+                except Exception as e:
+                    update_queue_error = e
+                    logger.warning(f"Failed to update queue state: {e}")
+
+            parallel_end_time = time.time()
+            enqueue_time = parallel_end_time  # For backward compatibility
+            queue_updated_time = parallel_end_time
+            
+            logger.info(f"Schedule finished, overhead: Selection: {selection_time - arrival_time:.3f}s Parallel(Enqueue+QueueUpdate): {parallel_end_time - parallel_start_time:.3f}s")
             # Save routing information
             self.last_routing_info = {
                 "request_id": request.request_id,

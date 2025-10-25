@@ -298,6 +298,26 @@ class ModelScheduler:
         with self.profile_lock:
             self.timing_profiles.clear()
 
+    def clear_queue(self) -> int:
+        """
+        Clear all pending tasks from the queue
+
+        Returns:
+            Number of tasks removed from queue
+        """
+        cleared_count = 0
+
+        # Drain the queue
+        while not self.pending_queue.empty():
+            try:
+                self.pending_queue.get_nowait()
+                cleared_count += 1
+            except:
+                break
+
+        logger.info(f"Cleared {cleared_count} pending tasks from {self.model_type} scheduler queue")
+        return cleared_count
+
     def save_timing_profiles(self, filepath: str):
         """Save timing profiles to JSON file"""
         with self.profile_lock:
@@ -898,3 +918,24 @@ class ModelSchedulerManager:
                 scheduler.save_timing_profiles(str(filepath))
 
         logger.info(f"Saved timing profiles for all models to {output_dir}")
+
+    def clear_all_queues(self) -> int:
+        """
+        Clear all pending tasks from all model scheduler queues
+
+        This method clears the pending queues of all active model schedulers,
+        useful for resetting between test runs.
+
+        Returns:
+            Total number of tasks removed from all queues
+        """
+        total_cleared = 0
+
+        with self._lock:
+            for model_type, scheduler in self._schedulers.items():
+                cleared = scheduler.clear_queue()
+                total_cleared += cleared
+                logger.info(f"Cleared {cleared} tasks from {model_type} scheduler")
+
+        logger.info(f"Total cleared from all model schedulers: {total_cleared}")
+        return total_cleared
