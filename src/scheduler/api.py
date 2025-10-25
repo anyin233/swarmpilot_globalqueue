@@ -5,7 +5,7 @@ Implements all API endpoints defined in Scheduler.md
 """
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from typing import Optional, Set
+from typing import Optional, Set, Dict
 from loguru import logger
 import os
 import json
@@ -32,6 +32,20 @@ from .models import (
     SettingsGetRequest, SettingsGetResponse
 )
 from .task_tracker import TaskInfo
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from fastapi import Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pyinstrument import Profiler
+from pyinstrument.renderers.html import HTMLRenderer
+from pyinstrument.renderers.speedscope import SpeedscopeRenderer
+
+
 
 # Configuration storage
 # Note: Lock-free scheduler is now the default for maximum performance
@@ -87,6 +101,50 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# Global flag for profiling (will be set from command line argument)
+_profiling_enabled = False
+
+def enable_profiler_middleware():
+    """
+    Register profiling middleware for the FastAPI app.
+    Must be called before the app starts serving requests.
+    """
+    @app.middleware("http")
+    async def profile_request(request: Request, call_next: Callable):
+        """Profile the current request
+
+        Taken from https://pyinstrument.readthedocs.io/en/latest/guide.html#profile-a-web-request-in-fastapi
+        with small improvements.
+
+        """
+        # we map a profile type to a file extension, as well as a pyinstrument profile renderer
+        profile_type_to_ext = {"html": "html", "speedscope": "speedscope.json"}
+        profile_type_to_renderer = {
+            "html": HTMLRenderer,
+            "speedscope": SpeedscopeRenderer,
+        }
+
+        # if the `profile=true` HTTP query argument is passed, we profile the request
+        if request.query_params.get("profile", False):
+
+            # The default profile format is speedscope
+            profile_type = request.query_params.get("profile_format", "speedscope")
+
+            # we profile the request along with all additional middlewares, by interrupting
+            # the program every 1ms1 and records the entire stack at that point
+            with Profiler(interval=0.001, async_mode="enabled") as profiler:
+                response = await call_next(request)
+
+            # we dump the profiling into a file
+            extension = profile_type_to_ext[profile_type]
+            renderer = profile_type_to_renderer[profile_type]()
+            with open(f"profile.{extension}", "w") as out:
+                out.write(profiler.output(renderer=renderer))
+            return response
+
+        # Proceed without profiling
+        return await call_next(request)
+
 # WebSocket connection manager for task events
 class TaskEventManager:
     """Manages WebSocket connections for task event notifications"""
@@ -108,15 +166,22 @@ class TaskEventManager:
             self.active_connections.discard(websocket)
         logger.info(f"WebSocket client disconnected. Total clients: {len(self.active_connections)}")
 
-    async def broadcast_task_completion(self, task_info: dict):
+    async def broadcast_task_completion(self, task_info: dict) -> int:
         """
         Broadcast task completion event to all connected clients
 
         Args:
             task_info: Dictionary containing task completion information
+
+        Returns:
+            Number of clients successfully notified
         """
         if not self.active_connections:
-            return
+            logger.warning(
+                f"No active WebSocket clients to broadcast task completion for "
+                f"task {task_info.get('task_id', 'unknown')}. Event will be lost!"
+            )
+            return 0
 
         # Prepare event message
         event_message = {
@@ -126,11 +191,21 @@ class TaskEventManager:
 
         # Send to all connected clients
         disconnected = set()
+        success_count = 0
+
         for connection in self.active_connections.copy():
             try:
                 await connection.send_json(event_message)
+                success_count += 1
+                logger.debug(
+                    f"Successfully sent task completion event for task "
+                    f"{task_info.get('task_id', 'unknown')} to client"
+                )
             except Exception as e:
-                logger.warning(f"Failed to send event to client: {e}")
+                logger.warning(
+                    f"Failed to send event for task {task_info.get('task_id', 'unknown')} "
+                    f"to client: {e}"
+                )
                 disconnected.add(connection)
 
         # Clean up disconnected clients
@@ -139,14 +214,241 @@ class TaskEventManager:
                 self.active_connections -= disconnected
             logger.info(f"Removed {len(disconnected)} disconnected clients")
 
+        logger.info(
+            f"Broadcasted task {task_info.get('task_id', 'unknown')} completion "
+            f"to {success_count}/{len(self.active_connections) + len(disconnected)} clients"
+        )
+
+        return success_count
+
 # Global event manager instance
 task_event_manager = TaskEventManager()
+
+
+# WebSocket connection manager for result submission
+class ResultSubmissionManager:
+    """Manages persistent WebSocket connections from TaskInstances for result submission and task dispatch"""
+
+    def __init__(self, max_connections: int = 10000):
+        """
+        Initialize ResultSubmissionManager
+
+        Args:
+            max_connections: Maximum number of concurrent connections (default: 10000)
+        """
+        # Map instance_id to WebSocket connection
+        self.connections: Dict[str, WebSocket] = {}
+        self._lock = asyncio.Lock()
+        self.max_connections = max_connections
+
+        # Statistics
+        self.total_registrations = 0
+        self.total_unregistrations = 0
+        self.rejected_connections = 0
+        self.total_tasks_dispatched = 0
+        self.total_dispatch_failures = 0
+
+    async def register_instance(self, instance_id: str, websocket: WebSocket, already_accepted: bool = False):
+        """
+        Register a TaskInstance WebSocket connection
+
+        Args:
+            instance_id: Instance identifier
+            websocket: WebSocket connection
+            already_accepted: Whether websocket.accept() has already been called
+
+        Raises:
+            RuntimeError: If max connections limit is reached
+        """
+        async with self._lock:
+            # Check connection limit
+            if len(self.connections) >= self.max_connections and instance_id not in self.connections:
+                self.rejected_connections += 1
+                raise RuntimeError(f"Maximum connections ({self.max_connections}) reached")
+
+            # Close existing connection if any
+            if instance_id in self.connections:
+                old_ws = self.connections[instance_id]
+                try:
+                    await old_ws.close(code=1000, reason="Replaced by new connection")
+                    logger.debug(f"Closed old connection for {instance_id}")
+                except Exception as e:
+                    logger.debug(f"Error closing old connection: {e}")
+
+            # Accept connection if not already done
+            if not already_accepted:
+                await websocket.accept()
+
+            self.connections[instance_id] = websocket
+            self.total_registrations += 1
+
+        logger.info(
+            f"TaskInstance {instance_id} registered for WebSocket. "
+            f"Active: {len(self.connections)}/{self.max_connections}"
+        )
+
+    async def unregister_instance(self, instance_id: str):
+        """Unregister a TaskInstance WebSocket connection"""
+        async with self._lock:
+            if instance_id in self.connections:
+                del self.connections[instance_id]
+                self.total_unregistrations += 1
+        logger.info(f"TaskInstance {instance_id} unregistered. Active: {len(self.connections)}")
+
+    async def send_ack(self, instance_id: str, task_id: str, success: bool, message: str = ""):
+        """
+        Send acknowledgment back to TaskInstance
+
+        Note: Does not hold lock while sending to avoid blocking other operations
+        """
+        # Get connection without holding lock
+        async with self._lock:
+            websocket = self.connections.get(instance_id)
+
+        if websocket:
+            try:
+                # Send with timeout
+                await asyncio.wait_for(
+                    websocket.send_json({
+                        "type": "ack",
+                        "task_id": task_id,
+                        "success": success,
+                        "message": message
+                    }),
+                    timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout sending ack to {instance_id} for task {task_id}")
+            except Exception as e:
+                logger.warning(f"Failed to send ack to {instance_id}: {e}")
+                # Mark connection for cleanup
+                await self.unregister_instance(instance_id)
+
+    async def cleanup_dead_connections(self):
+        """Remove connections that are no longer active"""
+        dead_connections = []
+
+        async with self._lock:
+            for instance_id, ws in list(self.connections.items()):
+                try:
+                    # Check if connection is still alive
+                    if ws.client_state.name != "CONNECTED":
+                        dead_connections.append(instance_id)
+                except Exception:
+                    dead_connections.append(instance_id)
+
+            # Remove dead connections
+            for instance_id in dead_connections:
+                if instance_id in self.connections:
+                    del self.connections[instance_id]
+
+        if dead_connections:
+            logger.info(f"Cleaned up {len(dead_connections)} dead WebSocket connections")
+
+        return len(dead_connections)
+
+    def get_connection_count(self) -> int:
+        """Get number of active connections"""
+        return len(self.connections)
+
+    def get_statistics(self) -> Dict[str, int]:
+        """Get connection statistics"""
+        return {
+            "active_connections": len(self.connections),
+            "max_connections": self.max_connections,
+            "total_registrations": self.total_registrations,
+            "total_unregistrations": self.total_unregistrations,
+            "rejected_connections": self.rejected_connections,
+            "total_tasks_dispatched": self.total_tasks_dispatched,
+            "total_dispatch_failures": self.total_dispatch_failures
+        }
+
+    async def dispatch_task(
+        self,
+        instance_id: str,
+        task_id: str,
+        model_name: str,
+        task_input: Dict[str, Any],
+        metadata: Dict[str, Any] = None,
+        timeout: float = 5.0
+    ) -> bool:
+        """
+        Dispatch a task to TaskInstance via WebSocket
+
+        Args:
+            instance_id: Target instance identifier
+            task_id: Unique task identifier
+            model_name: Model name for the task
+            task_input: Task input data
+            metadata: Optional task metadata
+            timeout: Timeout for task dispatch (default: 5.0s)
+
+        Returns:
+            True if dispatch successful, False otherwise
+        """
+        # Get connection without holding lock
+        async with self._lock:
+            websocket = self.connections.get(instance_id)
+
+        if not websocket:
+            logger.warning(f"No WebSocket connection for instance {instance_id}")
+            self.total_dispatch_failures += 1
+            return False
+
+        try:
+            # Send task message with timeout
+            await asyncio.wait_for(
+                websocket.send_json({
+                    "type": "task",
+                    "task_id": task_id,
+                    "model_name": model_name,
+                    "task_input": task_input,
+                    "metadata": metadata or {}
+                }),
+                timeout=timeout
+            )
+            self.total_tasks_dispatched += 1
+            logger.debug(f"Dispatched task {task_id} to instance {instance_id} via WebSocket")
+            return True
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout dispatching task {task_id} to instance {instance_id}")
+            self.total_dispatch_failures += 1
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to dispatch task {task_id} to instance {instance_id}: {e}")
+            self.total_dispatch_failures += 1
+            # Mark connection for cleanup
+            await self.unregister_instance(instance_id)
+            return False
+
+    def has_connection(self, instance_id: str) -> bool:
+        """Check if instance has active WebSocket connection"""
+        return instance_id in self.connections
+
+
+# Global result submission manager instance
+result_submission_manager = ResultSubmissionManager()
+
+# Inject result submission manager into scheduler for WebSocket task dispatch
+scheduler.result_submission_manager = result_submission_manager
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "scheduler", "version": "2.0.0"}
+
+
+@app.get("/websocket/stats")
+async def websocket_stats():
+    """Get WebSocket connection statistics"""
+    return {
+        "result_submission": result_submission_manager.get_statistics(),
+        "task_events": {
+            "active_connections": len(task_event_manager.active_connections)
+        }
+    }
 
 
 @app.post("/settings/set", response_model=SettingsSetResponse)
@@ -709,19 +1011,8 @@ async def submit_result(request: ResultSubmitRequest):
         Confirmation response
     """
     try:
-        # Find instance UUID by matching instance_id
-        instance_uuid = None
-        for ti in scheduler.taskinstances:
-            # Extract port from instance_id (format: "ti-<pid>")
-            # and match against TaskInstance base_url
-            try:
-                status = ti.instance.get_status()
-                if status.instance_id == request.instance_id:
-                    instance_uuid = ti.uuid
-                    break
-            except Exception as e:
-                logger.debug(f"Could not get status for instance {ti.uuid}: {e}")
-                continue
+        # Find instance UUID using cached mapping (optimized for high load)
+        instance_uuid = scheduler.get_uuid_by_instance_id(request.instance_id)
 
         if instance_uuid is None:
             logger.warning(
@@ -746,6 +1037,8 @@ async def submit_result(request: ResultSubmitRequest):
         # Broadcast task completion event to WebSocket clients
         task_info_obj = scheduler.task_tracker.get_task_info(request.task_id)
         if task_info_obj:
+            # Deep copy task data BEFORE broadcasting to avoid race condition
+            # This ensures data remains valid even if broadcast is delayed
             task_event_data = {
                 'task_id': task_info_obj.task_id,
                 'task_status': task_info_obj.task_status.value,
@@ -753,10 +1046,20 @@ async def submit_result(request: ResultSubmitRequest):
                 'submit_time': task_info_obj.submit_time,
                 'model_name': task_info_obj.model_name,
                 'result': task_info_obj.result,
-                'completion_time': task_info_obj.completion_time
+                'completion_time': task_info_obj.completion_time,
+                'replica_id': request.replica_id  # Include replica_id from the submission request
             }
-            # Fire and forget - don't block the response
-            asyncio.create_task(task_event_manager.broadcast_task_completion(task_event_data))
+
+            # Broadcast to all connected test clients
+            num_clients = await task_event_manager.broadcast_task_completion(task_event_data)
+            logger.debug(
+                f"[HTTP] Broadcasted completion event for task {request.task_id} "
+                f"to {num_clients} client(s)"
+            )
+
+            # Remove task from local tracking after successful notification
+            scheduler.task_tracker.remove_task(request.task_id)
+            logger.debug(f"[TaskTracker] Removed completed task {request.task_id}")
 
         logger.info(
             f"Received result for task {request.task_id} from instance {request.instance_id}"
@@ -887,27 +1190,41 @@ async def get_all_tasks():
 @app.post("/task/clear", response_model=ClearTasksResponse)
 async def clear_all_tasks():
     """
-    Clear all tasks from the tracker
+    Clear all tasks from the tracker and scheduler queues
 
-    This endpoint removes all tasks (queued, scheduled, completed) from the
-    TaskTracker. This is useful for resetting the system between experiments
-    or test runs.
+    This endpoint performs a comprehensive cleanup:
+    1. Clears all tasks from TaskTracker (queued, scheduled, completed)
+    2. Clears pending tasks cache in scheduling strategy
+    3. Clears all model scheduler queues (if async scheduling is enabled)
+
+    This is useful for resetting the system between experiments or test runs.
 
     Returns:
         Number of tasks cleared and status message
     """
     try:
-        cleared_count = scheduler.task_tracker.clear_all()
+        # Clear all tasks from task tracker
+        tracker_cleared = scheduler.task_tracker.clear_all()
+        logger.info(f"Cleared {tracker_cleared} tasks from tracker")
 
         # Clear strategy's pending tasks cache if it has the method
+        strategy_cleared = 0
         if hasattr(scheduler.strategy, 'clear_pending_tasks'):
             scheduler.strategy.clear_pending_tasks()
             logger.info("Cleared pending tasks cache in scheduling strategy")
 
+        # Clear model scheduler queues if async scheduling is enabled
+        queue_cleared = 0
+        if scheduler.async_scheduler_manager and scheduler.async_scheduler_manager.is_enabled():
+            queue_cleared = scheduler.async_scheduler_manager.clear_all_queues()
+            logger.info(f"Cleared {queue_cleared} tasks from model scheduler queues")
+
+        total_cleared = tracker_cleared + queue_cleared
+
         return ClearTasksResponse(
             status="success",
-            message=f"Cleared {cleared_count} tasks from tracker",
-            cleared_count=cleared_count
+            message=f"Cleared {total_cleared} tasks (tracker: {tracker_cleared}, queues: {queue_cleared})",
+            cleared_count=total_cleared
         )
 
     except Exception as e:
@@ -1235,6 +1552,223 @@ async def save_profiling_data(output_dir: str = Query("/tmp/scheduler_profiles")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.websocket("/ws/result_submit")
+async def websocket_result_submit(websocket: WebSocket):
+    """
+    Bidirectional WebSocket endpoint for TaskInstance communication
+
+    This provides a persistent, low-latency connection for both task dispatch
+    and result submission, avoiding HTTP connection overhead.
+
+    Protocol:
+        1. TaskInstance connects and sends registration message:
+           {"type": "register", "instance_id": "ti-8000"}
+
+        2. Scheduler sends tasks to TaskInstance:
+           {
+               "type": "task",
+               "task_id": "task-123",
+               "model_name": "gpt-3.5",
+               "task_input": {...},
+               "metadata": {...}
+           }
+
+        3. TaskInstance acknowledges task receipt:
+           {"type": "task_ack", "task_id": "task-123", "success": true/false, "message": "..."}
+
+        4. TaskInstance sends results as they complete:
+           {
+               "type": "result",
+               "task_id": "task-123",
+               "instance_id": "ti-8000",
+               "execution_time": 150.5,
+               "result": {...},
+               "metadata": {...}
+           }
+
+        5. Scheduler responds with acknowledgment:
+           {"type": "ack", "task_id": "task-123", "success": true, "message": "..."}
+    """
+    instance_id = None
+    try:
+        # Accept the WebSocket connection first
+        await websocket.accept()
+
+        # Wait for registration message with timeout
+        try:
+            registration_data = await asyncio.wait_for(
+                websocket.receive_json(),
+                timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            await websocket.close(code=1008, reason="Registration timeout")
+            logger.warning("WebSocket registration timeout")
+            return
+
+        if registration_data.get("type") != "register":
+            await websocket.close(code=1008, reason="First message must be registration")
+            return
+
+        instance_id = registration_data.get("instance_id")
+        if not instance_id:
+            await websocket.close(code=1008, reason="instance_id required")
+            return
+
+        # Register the connection with limit checking (already_accepted=True)
+        try:
+            await result_submission_manager.register_instance(instance_id, websocket, already_accepted=True)
+        except RuntimeError as e:
+            # Max connections reached
+            await websocket.close(code=1008, reason=str(e))
+            logger.warning(f"Connection rejected for {instance_id}: {e}")
+            return
+
+        # Send registration confirmation
+        await websocket.send_json({
+            "type": "registered",
+            "instance_id": instance_id,
+            "message": "Registration successful"
+        })
+
+        # Helper function to process a single result
+        async def process_single_result(msg):
+            """Process a single result message."""
+            try:
+                # Extract result data
+                task_id = msg.get("task_id")
+                execution_time = msg.get("execution_time")
+                result_data = msg.get("result")
+                metadata = msg.get("metadata", {})
+                replica_id = msg.get("replica_id")  # Extract replica_id from message
+
+                if not all([task_id, execution_time is not None, result_data is not None]):
+                    await result_submission_manager.send_ack(
+                        instance_id, task_id or "unknown",
+                        False, "Missing required fields"
+                    )
+                    return
+
+                # Find instance UUID using cached mapping
+                instance_uuid = scheduler.get_uuid_by_instance_id(instance_id)
+
+                if instance_uuid is None:
+                    await result_submission_manager.send_ack(
+                        instance_id, task_id,
+                        False, f"Instance {instance_id} not found"
+                    )
+                    return
+
+                # Process task completion
+                total_time = scheduler.handle_task_completion(
+                    task_id=task_id,
+                    instance_uuid=instance_uuid,
+                    execution_time=execution_time
+                )
+
+                # Store result in TaskTracker
+                scheduler.task_tracker.mark_completed(task_id, result_data)
+
+                # Broadcast task completion event to WebSocket clients
+                task_info_obj = scheduler.task_tracker.get_task_info(task_id)
+                if task_info_obj:
+                    # Deep copy task data BEFORE broadcasting to avoid race condition
+                    # This ensures data remains valid even if broadcast is delayed
+                    task_event_data = {
+                        'task_id': task_info_obj.task_id,
+                        'task_status': task_info_obj.task_status.value,
+                        'scheduled_ti': str(task_info_obj.scheduled_ti),
+                        'submit_time': task_info_obj.submit_time,
+                        'model_name': task_info_obj.model_name,
+                        'result': task_info_obj.result,
+                        'completion_time': task_info_obj.completion_time,
+                        'replica_id': replica_id  # Include replica_id from the WebSocket message
+                    }
+
+                    # Broadcast to all connected test clients
+                    num_clients = await task_event_manager.broadcast_task_completion(task_event_data)
+                    logger.debug(
+                        f"[WebSocket] Broadcasted completion event for task {task_id} "
+                        f"to {num_clients} client(s)"
+                    )
+
+                    # Remove task from tracker after successful broadcast
+                    scheduler.task_tracker.remove_task(task_id)
+                    logger.debug(f"[TaskTracker] Removed completed task {task_id}")
+
+                # Send acknowledgment
+                await result_submission_manager.send_ack(
+                    instance_id, task_id, True,
+                    f"Result received (total_time: {total_time:.3f}ms)"
+                )
+
+                logger.info(f"[WebSocket] Received result for task {task_id} from {instance_id}")
+
+            except Exception as e:
+                logger.error(f"Error processing result: {e}", exc_info=True)
+                await result_submission_manager.send_ack(
+                    instance_id, msg.get("task_id", "unknown"),
+                    False, f"Processing error: {str(e)}"
+                )
+
+        # Main message processing loop
+        while True:
+            try:
+                message = await websocket.receive_json()
+
+                msg_type = message.get("type")
+
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+
+                elif msg_type == "task_ack":
+                    # TaskInstance acknowledges task receipt
+                    task_id = message.get("task_id")
+                    success = message.get("success", False)
+                    ack_message = message.get("message", "")
+
+                    if success:
+                        logger.info(f"[WebSocket] Task {task_id} acknowledged by {instance_id}: {ack_message}")
+                    else:
+                        logger.warning(f"[WebSocket] Task {task_id} rejected by {instance_id}: {ack_message}")
+                    continue
+
+                # Handle batch messages
+                elif msg_type == "batch":
+                    messages = message.get("messages", [])
+                    logger.debug(f"[WebSocket] Processing batch of {len(messages)} messages from {instance_id}")
+
+                    for msg in messages:
+                        # Process each message in the batch
+                        await process_single_result(msg)
+                    continue
+
+                elif msg_type == "result":
+                    # Process single result submission
+                    await process_single_result(message)
+
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"Unknown message type: {msg_type}"
+                    })
+                    continue
+
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"WebSocket receive error: {e}")
+                break
+
+    except WebSocketDisconnect:
+        logger.info(f"TaskInstance {instance_id} disconnected during registration")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
+    finally:
+        if instance_id:
+            await result_submission_manager.unregister_instance(instance_id)
+
+
 @app.websocket("/ws/task_events")
 async def websocket_task_events(websocket: WebSocket):
     """
@@ -1275,6 +1809,18 @@ async def websocket_task_events(websocket: WebSocket):
         await task_event_manager.disconnect(websocket)
 
 
+async def cleanup_websocket_connections():
+    """Periodic task to clean up dead WebSocket connections"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Run every 60 seconds
+            cleaned = await result_submission_manager.cleanup_dead_connections()
+            if cleaned > 0:
+                logger.info(f"Periodic cleanup: removed {cleaned} dead connections")
+        except Exception as e:
+            logger.error(f"Error in periodic cleanup task: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize scheduler"""
@@ -1285,6 +1831,10 @@ async def startup_event():
         logger.info("Using LOCK-FREE implementation for maximum performance")
     else:
         logger.info("Using original implementation")
+
+    # Start background cleanup task for WebSocket connections
+    asyncio.create_task(cleanup_websocket_connections())
+    logger.info("Started WebSocket connection cleanup task")
 
     # Load default configuration
     default_config = os.environ.get("SCHEDULER_CONFIG_PATH")
@@ -1326,4 +1876,51 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8200)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SwarmPilot Scheduler API Server")
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=os.environ.get("SCHEDULER_HOST", "0.0.0.0"),
+        help="Host to bind the server (default: 0.0.0.0, env: SCHEDULER_HOST)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("SCHEDULER_PORT", "8200")),
+        help="Port to bind the server (default: 8200, env: SCHEDULER_PORT)"
+    )
+    parser.add_argument(
+        "--enable-profile",
+        action="store_true",
+        default=False,
+        help="Enable profiling middleware, when enabled, profile=true will be available for all HTTP endpoints."
+    )
+    parser.add_argument(
+        "--enable-taskinstance-profile",
+        action="store_true",
+        default=False,
+        help="Enable profiling on all registered TaskInstances. When enabled, TaskInstances will automatically profile every 10th request and save results in speedscope format."
+    )
+
+    args = parser.parse_args()
+
+    # Enable profiler middleware if requested
+    if args.enable_profile:
+        logger.info("Profiling middleware enabled - use ?profile=true on any endpoint")
+        enable_profiler_middleware()
+    else:
+        logger.info("Profiling middleware disabled")
+
+    # Log TaskInstance profiling setting
+    if args.enable_taskinstance_profile:
+        logger.info("TaskInstance profiling enabled")
+        logger.info("  IMPORTANT: TaskInstances must be started with --enable-profile flag")
+        logger.info("  TaskInstances will automatically profile every 10th request")
+        logger.info("  Profile files will be saved to: taskinstance_profile_{port}/")
+    else:
+        logger.info("TaskInstance profiling disabled")
+
+    logger.info(f"Starting SwarmPilot Scheduler on {args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port)
