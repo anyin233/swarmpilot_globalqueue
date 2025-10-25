@@ -13,6 +13,7 @@ Features:
 - Shorter queues have higher probability of being selected
 """
 
+import queue
 from typing import List, Dict, Optional, Callable
 from dataclasses import dataclass, field
 from uuid import UUID
@@ -24,8 +25,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 import numpy as np
-from scipy import stats
-from scipy import integrate
+try:
+    from . import quantile_convolution as qc
+except ImportError:
+    # Fallback for testing environments
+    import sys
+    sys.path.insert(0, '/home/yanweiye/Project/swarmpilot/swarmpilot_globalqueue/src/scheduler/strategies')
+    import quantile_convolution as qc
 
 
 from .base import BaseStrategy, TaskInstance, TaskInstanceQueue, SelectionRequest
@@ -38,21 +44,102 @@ random.seed(42)
 class TaskPrediction:
     """Single task prediction information cache"""
     task_id: str
-    expected_ms: float
-    error_ms: float
-    enqueue_time: float
+    quantiles: List[float]
+    
 
+class QuantileProb:
+    """Utility class for quantile distribution"""
+    def __init__(self, quantiles: List[float], values: List[float] = None):
+        self.quantiles = quantiles
+        if values is None:
+            self.values = [0.0] * len(self.quantiles)
+        else:
+            self.values = values
+        
+    def add(self, values: List[float]) -> None:
+        assert len(values) == len(self.quantiles), "Number of quantile value not aligned with this one"
+        # Assume input distribution is independ with this one
+        # Sample -> Add -> Done
+        self.values = qc.sum_quantiles(self.quantiles, self.values, self.quantiles, values, p_eval=self.quantiles)
+    
+    def sub(self, values: List[float]):
+        """
+        Fixed subtraction method for quantile distributions.
+        For independent random variables X and Y:
+        X - Y = X + (-Y)
 
+        The quantiles of -Y are related to Y by:
+        Q_{-Y}(p) = -Q_Y(1-p)
+
+        This means:
+        - The p-th quantile of -Y equals the negative of the (1-p)-th quantile of Y
+        """
+        assert len(values) == len(self.quantiles), "Number of quantile value not aligned with this one"
+
+        # Create the quantiles for -Y
+        # For -Y: Q_{-Y}(p) = -Q_Y(1-p)
+        neg_values = []
+        neg_quantiles = []
+
+        # Build the negative distribution's quantiles
+        for p in self.quantiles:
+            # For probability p, we need Q_{-Y}(p) = -Q_Y(1-p)
+            # Find the value at probability 1-p in the original distribution
+            neg_quantiles.append(p)
+
+            # Find the corresponding 1-p in the original quantiles
+            target_p = 1.0 - p
+
+            # Interpolate to find Q_Y(1-p)
+            if target_p in self.quantiles:
+                # Exact match
+                idx = self.quantiles.index(target_p)
+                neg_values.append(-values[idx])
+            else:
+                # Need to interpolate
+                # Find where target_p would be in the quantiles
+                if target_p <= self.quantiles[0]:
+                    # Extrapolate from the left tail
+                    neg_values.append(-values[0])
+                elif target_p >= self.quantiles[-1]:
+                    # Extrapolate from the right tail
+                    neg_values.append(-values[-1])
+                else:
+                    # Interpolate between two points
+                    neg_val = -np.interp(target_p, self.quantiles, values)
+                    neg_values.append(neg_val)
+
+        # Now perform X + (-Y) using the convolution
+        self.values = qc.sum_quantiles(
+            self.quantiles, self.values,
+            neg_quantiles, neg_values,
+            p_eval=self.quantiles
+        )
+
+    def random_choice(self) -> float:
+        """
+        从当前的分位数分布中随机选取一个点
+        使用逆变换采样（Inverse Transform Sampling）
+        """
+        # 生成均匀随机数 U ~ Uniform(0, 1)
+        u = random.random()
+
+        # 使用线性插值在quantiles中找到对应的值
+        # np.interp(x, xp, fp): 在xp中找x的位置，返回对应fp的插值
+        sampled_value = np.interp(u, self.quantiles, self.values)
+
+        return sampled_value
+        
 @dataclass
 class QueueState:
     """Local queue state tracking for scheduler-side prediction"""
     expected_ms: float = 0.0
     error_ms: float = 0.0
+    dist: QuantileProb = None
     last_update_time: float = field(default_factory=time.time)
     task_count: int = 0
     # Pending tasks prediction cache for error recalculation
     pending_tasks: Dict[str, TaskPrediction] = field(default_factory=dict)
-
 
 class ProbabilisticQueueStrategy(BaseStrategy):
     """
@@ -79,6 +166,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         predictor_timeout: float = 10.0,
         min_weight: float = 0.01,
         epsilon: float = 1.0,
+        quantiles: List[float] = [0.25, 0.5, 0.75, 0.99],
         error_recalc_threshold: float = 2.0,
         debug_log_path: Optional[str] = None,
         get_debug_enabled: Optional[Callable[[], bool]] = None,
@@ -108,12 +196,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         self.epsilon = max(0.1, epsilon)  # Ensure epsilon is at least 0.1ms
         self.error_recalc_threshold = error_recalc_threshold
 
-        # Track queue state for each TaskInstance
-        self.queue_states: Dict[UUID, QueueState] = {}
-        for ti in taskinstances:
-            self.queue_states[ti.uuid] = QueueState()
-
-        # PredictorClient instance
+        # PredictorClient instance (initialize first to check for fake data mode)
         self.predictor_client = PredictorClient(
             base_url=predictor_url,
             timeout=predictor_timeout,
@@ -121,13 +204,37 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             fake_data_path=fake_data_path
         )
 
+        # If fake data mode is enabled, use fake percentiles from predictor
+        if fake_data_bypass:
+            fake_percentiles = self.predictor_client.get_fake_percentiles()
+            if fake_percentiles:
+                quantiles = fake_percentiles
+                logger.info(
+                    f"Fake data mode enabled: using predictor's fake percentiles: {quantiles}"
+                )
+            else:
+                logger.warning(
+                    f"Fake data mode enabled but no fake percentiles found, "
+                    f"using provided quantiles: {quantiles}"
+                )
+
+        # Store quantiles for later use
+        self.quantiles = quantiles
+
+        # Track queue state for each TaskInstance
+        self.queue_states: Dict[UUID, QueueState] = {}
+        for ti in taskinstances:
+            self.queue_states[ti.uuid] = QueueState()
+            self.queue_states[ti.uuid].dist = QuantileProb(quantiles)
+
         # Debug logging configuration
         self.debug_log_path = debug_log_path or "./probabilistic_queue_debug.jsonl"
         self.get_debug_enabled = get_debug_enabled or (lambda: False)
 
         logger.info(
             f"Initialized ProbabilisticQueueStrategy with PredictorClient at {predictor_url}, "
-            f"min_weight={min_weight}, epsilon={epsilon}ms"
+            f"min_weight={min_weight}, epsilon={epsilon}ms, "
+            f"quantiles={self.quantiles}, fake_data_mode={fake_data_bypass}"
         )
 
     def _write_debug_log(self, queue_states_snapshot: Dict[str, Dict[str, float]]):
@@ -150,49 +257,17 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         except Exception as e:
             logger.warning(f"Failed to write debug log: {e}")
     
-    def _calculate_shortest_queue_probabilities_optimized(self, queues):
-        n_queues = len(queues)
-        probabilities = np.zeros(n_queues)
 
-        for i, q in enumerate(queues):
-            A_i = q[0]
-            E_i = q[1]
-
-            # Handle edge case: if E_i is zero or very small, use epsilon
-            if E_i < self.epsilon:
-                E_i = self.epsilon
-
-            # 使用标准化变量 z = (x - A_i) / E_i
-            def integrand_standardized(z):
-                # 标准正态分布的PDF
-                pdf_std = stats.norm.pdf(z)
-
-                # x = A_i + E_i * z
-                x = A_i + E_i * z
-
-                # 连乘项
-                product = 1.0
-                for j in range(n_queues):
-                    if j != i:
-                        A_j = queues[j][0]  # Fixed: should access queues[j], not q
-                        E_j = queues[j][1]  # Fixed: should access queues[j], not q
-
-                        # Handle edge case: if E_j is zero or very small, use epsilon
-                        if E_j < self.epsilon:
-                            E_j = self.epsilon
-
-                        # P(l_j > x) = Gamma((A_j - x) / E_j)
-                        standardized_value = (A_j - x) / E_j
-                        tail_prob = stats.norm.cdf(standardized_value)
-                        product *= tail_prob
-
-                return pdf_std * product
-
-            # 积分区间：[-1, 1] (标准化后)
-            result, error = integrate.quad(integrand_standardized, -1, 1)
-            probabilities[i] = result
-
-        return probabilities
+    def _random_sample_based_shortest_queue_selection(self, dists: List[QuantileProb]):
+        candidcates = []
+        
+        for i, dist in enumerate(dists):
+            u = random.random()
+            candidcates.append((dist.random_choice(), i))
+        
+        choice = sorted(candidcates, key=lambda x: x[0])
+        
+        return choice[0]
 
     def _select_from_candidates(
         self,
@@ -214,6 +289,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         """
         # Use locally maintained queue states
         updated_candidates = []
+        candidcate_dists = []
         for ti, old_queue_info in candidates:
             try:
                 # Get queue state from local tracking
@@ -223,14 +299,9 @@ class ProbabilisticQueueStrategy(BaseStrategy):
                     queue_state = QueueState()
                     self.queue_states[ti.uuid] = queue_state
 
-                # Get current queue size from TaskInstance
-                try:
-                    client = ti.instance
-                    status = client.get_status()
-                    queue_size = status.queue_size
-                except Exception as e:
-                    logger.debug(f"Failed to get status for TaskInstance {ti.uuid}: {e}")
-                    queue_size = old_queue_info.queue_size
+                # Use locally tracked queue size (task_count)
+                # No need to query TaskInstance for real-time queue_size
+                queue_size = queue_state.task_count
 
                 # Create updated queue info using local state
                 updated_queue_info = TaskInstanceQueue(
@@ -243,41 +314,38 @@ class ProbabilisticQueueStrategy(BaseStrategy):
                 )
 
                 updated_candidates.append((ti, updated_queue_info))
+                candidcate_dists.append(queue_state.dist)
 
             except Exception as e:
                 logger.warning(f"Failed to update queue info for TaskInstance {ti.uuid}: {e}")
                 updated_candidates.append((ti, old_queue_info))
+                candidcate_dists.append(queue_state.dist)
 
-        queue_info = [(q.expected_ms, q.error_ms) for ti, q in updated_candidates]
         
-        weights = self._calculate_shortest_queue_probabilities_optimized(queue_info)
+        # weights = self._calculate_shortest_queue_probabilities_optimized(candidcate_dists)
 
-        # Log weights for debugging
-        logger.debug(
-            f"ProbabilisticQueueStrategy weights: " +
-            ", ".join([
-                f"{ti.uuid} (expected={qi.expected_ms:.1f}ms): {w:.4f}"
-                for (ti, qi), w in zip(updated_candidates, weights)
-            ])
-        )
+        # # Log weights for debugging
+        # logger.debug(
+        #     f"ProbabilisticQueueStrategy weights: " +
+        #     ", ".join([
+        #         f"{ti.uuid} (expected={qi.expected_ms:.1f}ms): {w:.4f}"
+        #         for (ti, qi), w in zip(updated_candidates, weights)
+        #     ])
+        # )
 
-        # Probabilistically select based on weights
-        selected = random.choices(updated_candidates, weights=weights, k=1)[0]
-
-        logger.info(
-            f"ProbabilisticQueueStrategy selected: instance {selected[0].uuid} "
-            f"with expected_ms={selected[1].expected_ms:.2f}ms, error_ms={selected[1].error_ms:.2f}ms"
-        )
+        # # Probabilistically select based on weights
+        # selected = random.choices(updated_candidates, weights=weights, k=1)[0]
+        _, selected_index = self._random_sample_based_shortest_queue_selection(candidcate_dists)
+        selected = updated_candidates[selected_index]
 
         # Write debug log if enabled
         if self.get_debug_enabled():
             queue_states_snapshot = {}
-            for (ti, queue_info), weight in zip(updated_candidates, weights):
+            for ti, queue_info in updated_candidates:
                 queue_states_snapshot[str(ti.uuid)] = {
                     "expected_ms": queue_info.expected_ms,
                     "error_ms": queue_info.error_ms,
                     "queue_size": queue_info.queue_size,
-                    "weight": weight,
                     "selected": (ti.uuid == selected[0].uuid)
                 }
             self._write_debug_log(queue_states_snapshot)
@@ -288,7 +356,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
         self,
         selected_instance: TaskInstance,
         request: SelectionRequest,
-        enqueue_response: EnqueueResponse
+        task_id: str,
     ):
         """
         Update queue state after task enqueue
@@ -301,10 +369,16 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             if 'server_time_cost' in request.metadata:
                 task_expected = float(request.metadata['server_time_cost'])
                 task_error = sqrt(task_expected * 0.05)
-                logger.info(f"Using real execution time: {task_expected:.2f}ms")
+                # Create simple quantile approximation from expected time
+                # Assume uniform distribution around expected value
+                quantiles = [
+                    task_expected * 0.75,  # 25th percentile
+                    task_expected,         # 50th percentile (median)
+                    task_expected * 1.25,  # 75th percentile
+                    task_expected * 1.5    # 99th percentile
+                ]
             else:
                 # Use PredictorClient to get prediction
-                logger.debug(f"Requesting prediction for model_type={request.model_type}")
                 prediction_response = self.predictor_client.predict(
                     model_type=request.model_type,
                     metadata=request.metadata
@@ -320,43 +394,48 @@ class ProbabilisticQueueStrategy(BaseStrategy):
 
                 # Use expect and error directly from results
                 if prediction_response.results.expect is not None and prediction_response.results.error is not None:
-                    task_expected = prediction_response.results.expect
-                    task_error = prediction_response.results.error
-                    logger.info(
-                        f"Prediction for {request.model_type}: "
-                        f"expected={task_expected:.2f}ms, error={task_error:.2f}ms"
-                    )
+                    quantiles = prediction_response.results.quantile_predictions
+                    
                 else:
-                    logger.warning("No expect/error in prediction response")
+                    logger.warning("No quantile in prediction response")
                     return
 
             # Cache task prediction information for error recalculation
-            task_id = enqueue_response.task_id
             queue_state = self.queue_states[selected_instance.uuid]
 
             queue_state.pending_tasks[task_id] = TaskPrediction(
                 task_id=task_id,
-                expected_ms=task_expected,
-                error_ms=task_error,
-                enqueue_time=enqueue_response.enqueue_time
+                quantiles=quantiles,
             )
 
             # Update queue state using error propagation
-            new_expected = queue_state.expected_ms + task_expected
-            new_error = sqrt(queue_state.error_ms ** 2 + task_error ** 2)
 
-            queue_state.expected_ms = new_expected
-            queue_state.error_ms = new_error
+
+            queue_state.dist.add(quantiles)
             queue_state.task_count += 1
             queue_state.last_update_time = time.time()
 
             logger.info(
                 f"Updated queue state for instance {selected_instance.uuid}: "
-                f"expected={new_expected:.2f}ms, error={new_error:.2f}ms, tasks={queue_state.task_count}"
+                f"quantiles={queue_state.dist.values}, tasks={queue_state.task_count}"
             )
 
         except Exception as e:
             logger.error(f"Failed to update queue state: {e}", exc_info=True)
+
+    def clear_pending_tasks(self):
+        """
+        Clear all pending tasks from cache.
+        This should be called when clearing all tasks from the system.
+        """
+        for queue_state in self.queue_states.values():
+            queue_state.pending_tasks.clear()
+            # Reset queue state to initial values
+            queue_state.expected_ms = 0.0
+            queue_state.error_ms = 0.0
+            queue_state.task_count = 0
+
+        logger.info(f"Cleared pending_tasks cache for all {len(self.queue_states)} instances")
 
     def update_queue_on_completion(self, instance_uuid: UUID, task_id: str, execution_time: float):
         """
@@ -373,59 +452,19 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             return
 
         queue_state = self.queue_states[instance_uuid]
-        old_expected = queue_state.expected_ms
-        old_error = queue_state.error_ms
+        old_dist = queue_state.dist
 
         # Step 1: Remove completed task from cache (for recalculation)
         if task_id in queue_state.pending_tasks:
-            queue_state.pending_tasks.pop(task_id)
-            logger.debug(f"Removed task {task_id} from pending_tasks cache")
+            tp = queue_state.pending_tasks.pop(task_id)
         else:
+            tp = TaskPrediction(task_id, [0] * len(old_dist.quantiles), 0)
             logger.warning(
                 f"Task {task_id} not found in pending_tasks cache for instance {instance_uuid}"
             )
 
         # Step 2: Subtract actual execution time (maintain current behavior)
-        new_expected = max(0.0, old_expected - execution_time)
-        queue_state.expected_ms = new_expected
+        queue_state.dist.sub(tp.quantiles)
         queue_state.task_count = max(0, queue_state.task_count - 1)
-
-        # Step 3: Check if error recalculation is needed
-        should_recalculate = (
-            queue_state.expected_ms > 0 and
-            old_error > self.error_recalc_threshold * queue_state.expected_ms
-        )
-
-        if should_recalculate:
-            logger.warning(
-                f"High error ratio detected for instance {instance_uuid}: "
-                f"error={old_error:.2f}ms > {self.error_recalc_threshold}×expected={queue_state.expected_ms:.2f}ms. "
-                f"Triggering queue state recalculation from {len(queue_state.pending_tasks)} pending tasks."
-            )
-
-            # Step 4: Recalculate from pending tasks
-            recalculated_expected = 0.0
-            recalculated_variance = 0.0
-
-            for pending_task in queue_state.pending_tasks.values():
-                recalculated_expected += pending_task.expected_ms
-                recalculated_variance += pending_task.error_ms ** 2
-
-            # Override current values with recalculated ones
-            queue_state.expected_ms = recalculated_expected
-            queue_state.error_ms = sqrt(recalculated_variance) if recalculated_variance > 0 else 0.0
-
-            logger.info(
-                f"Recalculated queue state for instance {instance_uuid}: "
-                f"expected={old_expected:.2f}ms -> {queue_state.expected_ms:.2f}ms (recalculated from pending tasks), "
-                f"error={old_error:.2f}ms -> {queue_state.error_ms:.2f}ms, "
-                f"tasks={queue_state.task_count}"
-            )
-        else:
-            logger.info(
-                f"Updated queue state on completion for instance {instance_uuid}: "
-                f"expected={old_expected:.2f}ms -> {new_expected:.2f}ms (subtracted {execution_time:.2f}ms), "
-                f"error={old_error:.2f}ms, tasks={queue_state.task_count}"
-            )
 
         queue_state.last_update_time = time.time()

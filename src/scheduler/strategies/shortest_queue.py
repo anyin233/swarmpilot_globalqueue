@@ -32,7 +32,6 @@ class TaskPrediction:
     task_id: str
     expected_ms: float
     error_ms: float
-    enqueue_time: float
 
 
 @dataclass
@@ -146,14 +145,9 @@ class ShortestQueueStrategy(BaseStrategy):
                     queue_state = QueueState()
                     self.queue_states[ti.uuid] = queue_state
 
-                # Get current queue size from TaskInstance
-                try:
-                    client = ti.instance
-                    status = client.get_status()
-                    queue_size = status.queue_size
-                except Exception as e:
-                    logger.debug(f"Failed to get status for TaskInstance {ti.uuid}: {e}")
-                    queue_size = old_queue_info.queue_size
+                # Use locally tracked queue size (task_count)
+                # No need to query TaskInstance for real-time queue_size
+                queue_size = queue_state.task_count
 
                 # Create updated queue info using local state
                 updated_queue_info = TaskInstanceQueue(
@@ -209,7 +203,7 @@ class ShortestQueueStrategy(BaseStrategy):
         self,
         selected_instance: TaskInstance,
         request: SelectionRequest,
-        enqueue_response: EnqueueResponse
+        task_id: str,
     ):
         """
         Update queue state after task enqueue
@@ -290,14 +284,12 @@ class ShortestQueueStrategy(BaseStrategy):
                     )
 
             # Cache task prediction information for error recalculation
-            task_id = enqueue_response.task_id
             queue_state = self.queue_states[selected_instance.uuid]
 
             queue_state.pending_tasks[task_id] = TaskPrediction(
                 task_id=task_id,
                 expected_ms=task_expected,
                 error_ms=task_error,
-                enqueue_time=enqueue_response.enqueue_time
             )
 
             # Update queue state using error propagation
@@ -337,6 +329,20 @@ class ShortestQueueStrategy(BaseStrategy):
 
         except Exception as e:
             logger.error(f"Failed to update queue state: {e}", exc_info=True)
+
+    def clear_pending_tasks(self):
+        """
+        Clear all pending tasks from cache.
+        This should be called when clearing all tasks from the system.
+        """
+        for queue_state in self.queue_states.values():
+            queue_state.pending_tasks.clear()
+            # Reset queue state to initial values
+            queue_state.expected_ms = 0.0
+            queue_state.error_ms = 0.0
+            queue_state.task_count = 0
+
+        logger.info(f"Cleared pending_tasks cache for all {len(self.queue_states)} instances")
 
     def update_queue_on_completion(self, instance_uuid: UUID, task_id: str, execution_time: float):
         """

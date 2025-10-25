@@ -22,6 +22,7 @@ class TaskInstance:
     uuid: UUID
     instance: TaskInstanceClient
     model_type: Optional[str] = None  # Cached model type
+    instance_id: Optional[str] = None  # Cached instance_id
 
 
 @dataclass
@@ -76,11 +77,12 @@ class BaseStrategy(ABC):
         """
         Filter available instances based on request requirements
 
-        This method queries all TaskInstances and builds a list of candidates
-        that match the requested model_type.
+        This method filters TaskInstances using cached information (model_type, instance_id)
+        that was populated during registration. It builds a list of candidates that match
+        the requested model_type WITHOUT querying each instance.
 
-        NOTE: This base implementation does NOT fetch queue predictions.
-        Subclasses that need queue prediction should override this method
+        NOTE: This base implementation does NOT fetch queue predictions or check replicas_running.
+        Subclasses that need queue prediction or runtime status should override this method
         or fetch predictions in their _select_from_candidates method.
 
         Args:
@@ -94,43 +96,37 @@ class BaseStrategy(ABC):
         """
         candidates: List[tuple[TaskInstance, TaskInstanceQueue]] = []
 
-        # Iterate through all Task Instances
+        # Iterate through all Task Instances using cached information
         for ti in self.taskinstances:
-            client = ti.instance
             try:
-                # Get instance status
-                status = client.get_status()
-
-                # Cache model type
-                ti.model_type = status.model_type
-
-                # Filter by model type
-                if status.model_type != request.model_type:
+                # Filter by cached model type (no API call needed)
+                if ti.model_type != request.model_type:
                     continue
 
-                # Skip if no models are running
-                if status.replicas_running == 0:
-                    logger.debug(f"TaskInstance {ti.uuid} has no running replicas, skipping")
+                # Use cached instance_id (set during registration)
+                # If instance_id is not cached, skip this instance
+                if not ti.instance_id:
+                    logger.warning(
+                        f"TaskInstance {ti.uuid} has no cached instance_id, "
+                        f"skipping (was it registered properly?)"
+                    )
                     continue
 
-                # Get queue size (but NOT prediction - let subclasses handle that)
-                queue_size = status.queue_size
-
-                # Create basic queue info without prediction
-                # Subclasses can populate expected_ms/error_ms if needed
+                # Create basic queue info without prediction or queue_size
+                # Subclasses can populate expected_ms/error_ms/queue_size if needed
                 queue_info = TaskInstanceQueue(
                     expected_ms=0.0,
                     error_ms=0.0,
-                    queue_size=queue_size,
-                    model_type=status.model_type,
-                    instance_id=status.instance_id,
+                    queue_size=0,  # Not tracked in filter phase
+                    model_type=ti.model_type,
+                    instance_id=ti.instance_id,
                     ti_uuid=ti.uuid
                 )
 
                 candidates.append((ti, queue_info))
 
             except Exception as e:
-                logger.warning(f"Failed to query TaskInstance {ti.uuid}: {e}")
+                logger.warning(f"Failed to process TaskInstance {ti.uuid}: {e}")
                 continue
 
         if not candidates:
@@ -164,7 +160,7 @@ class BaseStrategy(ABC):
         self,
         selected_instance: TaskInstance,
         request: SelectionRequest,
-        enqueue_response: EnqueueResponse
+        task_id: str,
     ):
         """
         Update queue state after a task has been enqueued
@@ -191,7 +187,7 @@ class BaseStrategy(ABC):
         Args:
             instance_uuid: UUID of the TaskInstance where the task completed
             task_id: ID of the completed task
-            execution_time: Actual execution time in milliseconds (used for logging/metrics only)
+            execution_time: (Optional)Actual execution time in milliseconds (used for logging/metrics only)
 
         Note:
             Default implementation does nothing. Strategies that maintain queue state
