@@ -25,6 +25,7 @@ Usage:
 """
 
 from math import e
+from turtle import mode
 import httpx
 import os
 from typing import Dict, Any, Optional, List
@@ -119,7 +120,9 @@ class PredictorClient:
             try:
                 all_fake_data = os.listdir(fake_data_path)
                 self.fake_data_mapping = {}
+                self.fake_data_mapping_exp = {}
                 self.fake_precentile = [0.01, 0.05, 0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90, 0.95, 0.98, 0.99, 0.995]
+
                 
                 for data_name in all_fake_data:
                     if not data_name.endswith(".json"):
@@ -128,46 +131,75 @@ class PredictorClient:
                     with open(data_file_path, 'r') as f:
                         fake_data = json.load(f)
                     model_name = data_name[:-5]
-                    self.fake_data_mapping[model_name] = fake_data
+                    if model_name.endswith("_exp"):
+                        self.fake_data_mapping_exp[model_name[:-4]] = fake_data
+                    else:
+                        self.fake_data_mapping[model_name] = fake_data
                     logger.info(f"Fake data of {model_name} is load from {data_name}")
                 
                 
-                # Pre-compute precentile of each data
+                
+                # Pre-compute statistics using fake_data_exp for expect/var/std
+                # but keep quantile calculations from fake_data (quantile data)
                 self.fake_data_statics = {}
-                for data_name, fake_data in self.fake_data_mapping.items():
+
+                for (data_name, fake_data), (_, fake_data_exp) in zip(
+                    self.fake_data_mapping.items(),
+                    self.fake_data_mapping_exp.items()
+                ):
                     if isinstance(fake_data, list):
-                        quantile_predictions = np.percentile(fake_data, [q * 100 for q in self.fake_precentile])
-                        exp, var, std = calculate_moments(np.array(self.fake_precentile), quantile_predictions)
-                        self.fake_data_statics[data_name] =  {
-                                    "quantile": quantile_predictions.tolist(),
-                                    "quantile_set": self.fake_precentile,
-                                    "expect": float(exp),
-                                    "variance": float(var),
-                                    "standard": float(std)
-                                }
+                        # Calculate quantiles from fake_data (quantile distribution)
+                        fake_data_val = [v for v in fake_data]
+                        quantile_predictions = np.percentile(fake_data_val, [q * 100 for q in self.fake_precentile])
+
+                        # Calculate expect/var/std from fake_data_exp (original samples)
+                        fake_data_exp_val = np.array([v for v in fake_data_exp])
+                        exp = float(np.mean(fake_data_exp_val))
+                        var = float(np.var(fake_data_exp_val))
+                        std = float(np.std(fake_data_exp_val))
+
+                        self.fake_data_statics[data_name] = {
+                            "quantile": quantile_predictions.tolist(),
+                            "quantile_set": self.fake_precentile,
+                            "expect": exp,
+                            "variance": var,
+                            "standard": std
+                        }
                     elif isinstance(fake_data, dict):
                         cur_fake_data_statics = {}
+                        all_fake_data_keyset = []
+                        all_fake_data_lists = []
+                        
                         for key, fake_data_list in fake_data.items():
-                            quantile_predictions = np.percentile(fake_data_list, [q * 100 for q in self.fake_precentile])
-                            exp, var, std = calculate_moments(np.array(self.fake_precentile), quantile_predictions)
+                            # Calculate quantiles from fake_data (quantile distribution)
+                            fake_data_val = [v for v in fake_data_list]
+                            quantile_predictions = np.percentile(fake_data_val, [q * 100 for q in self.fake_precentile])
+
+                            # Calculate expect/var/std from fake_data_exp (original samples)
+                            fake_data_exp_val = np.array([v for v in fake_data_exp])
+                            exp = float(np.mean(fake_data_exp_val))
+                            var = float(np.var(fake_data_exp_val))
+                            std = float(np.std(fake_data_exp_val))
+
                             # Convert key to float or tuple of floats for dictionary lookup
                             if isinstance(key, list):
-                                new_key = tuple(float(v) for v in key)  # Multi-value keys as tuple
+                                new_key = tuple(int(v) for v in key)  # Multi-value keys as tuple
                             elif isinstance(key, str):
                                 # Try to convert string keys to float
                                 try:
-                                    new_key = float(key)
+                                    new_key = tuple(int(v) for v in key.split(','))
                                 except ValueError:
                                     new_key = key  # Keep as string if not numeric
                             else:
                                 new_key = float(key)
+
                             cur_fake_data_statics[new_key] = {
-                                    "quantile": quantile_predictions.tolist(),
-                                    "quantile_set": self.fake_precentile,
-                                    "expect": float(exp),
-                                    "variance": float(var),
-                                    "standard": float(std)
-                                }
+                                "quantile": quantile_predictions.tolist(),
+                                "quantile_set": self.fake_precentile,
+                                "expect": exp,
+                                "variance": var,
+                                "standard": std
+                            }
                         self.fake_data_statics[data_name] = cur_fake_data_statics
                     else:
                         raise RuntimeError("Un-supported fake data format")
@@ -425,6 +457,17 @@ class PredictorClient:
             logger.debug(f"Predictor service not available: {e}")
             return False
 
+    def get_fake_percentiles(self) -> Optional[List[float]]:
+        """
+        Get the percentiles used in fake data mode
+
+        Returns:
+            List[float]: List of percentile values if fake data mode is enabled, None otherwise
+        """
+        if self.fake_data_enabled and hasattr(self, 'fake_precentile'):
+            return self.fake_precentile
+        return None
+
     # ========== Backward Compatibility ==========
 
     def predict(
@@ -504,11 +547,15 @@ class PredictorClient:
             input_features.append({"param_name": "output_tokens", "val": metadata["output_tokens"]})
         if "batch_size" in metadata:
             input_features.append({"param_name": "batch_size", "val": metadata["batch_size"]})
+        if "pixel_num" in metadata:
+            input_features.append({"param_name": "pixel_num", "val": metadata["pixel_num"]})
+        if "duration" in metadata:
+            input_features.append({"param_name": "duration", "val": metadata["duration"]})
 
         # Add any other numeric features
         skip_keys = {"model_name", "hardware", "software_name", "software_version",
                      "input_tokens", "output_tokens", "batch_size", "server_time_cost",
-                     "confidence_level", "lookup_table", "lookup_table_name"}
+                     "confidence_level", "lookup_table", "lookup_table_name", "pixel_num", "duration", "is_warmup"}
 
         for key, value in metadata.items():
             if key not in skip_keys and isinstance(value, (int, float)):
@@ -516,7 +563,7 @@ class PredictorClient:
 
         # Build trace object with model_id for proper model type detection
         trace = {"input_feature": input_features, "model_id": model_name} if input_features else {"model_id": model_name}
-        logger.info(trace)
+        logger.info(f"feature: {trace}")
         # Extract optional parameters
         confidence_level = metadata.get("confidence_level", 0.95)
         lookup_table = metadata.get("lookup_table", False)
