@@ -18,3 +18,11 @@ tests/
 *.log
 
 task_instances.yaml
+
+# Profiling data
+*.speedscope.json
+profile*.json
+
+# Backup files
+*.bak
+*.backup
