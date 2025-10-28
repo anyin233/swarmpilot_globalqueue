@@ -148,7 +148,7 @@ class LockFreeTaskTracker:
         # Background cleanup thread pool
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="TaskTrackerCleanup")
         self._cleanup_queue = Queue()
-        self._shutdown = False
+        self._shutdown_event = threading.Event()
 
         # Start background cleanup worker
         self._start_cleanup_worker()
@@ -156,11 +156,14 @@ class LockFreeTaskTracker:
     def _start_cleanup_worker(self):
         """Start background cleanup worker"""
         def cleanup_worker():
-            while not self._shutdown:
+            while not self._shutdown_event.is_set():
                 try:
-                    # Check for cleanup every interval
-                    time.sleep(self._cleanup_interval)
-                    if not self._shutdown:
+                    # Wait for cleanup interval or shutdown signal
+                    if self._shutdown_event.wait(timeout=self._cleanup_interval):
+                        # Shutdown was signaled
+                        break
+                    # Perform cleanup if not shutting down
+                    if not self._shutdown_event.is_set():
                         self._async_cleanup()
                 except Exception as e:
                     logger.error(f"Cleanup worker error: {e}")

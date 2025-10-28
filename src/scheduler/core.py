@@ -26,6 +26,7 @@ from .strategies import (
     TaskInstance,
     SelectionRequest
 )
+import pyinstrument
 from .model_scheduler import ModelSchedulerManager
 from .lockfree_scheduler_manager import LockFreeSchedulerManager
 from .lockfree_task_tracker import LockFreeTaskTracker
@@ -673,6 +674,7 @@ class SwarmPilotScheduler:
             model_name=model_name
         )
 
+    # @pyinstrument.profile()
     def schedule(self, request: SchedulerRequest) -> SchedulerResponse:
         """
         Schedule a task to the optimal TaskInstance

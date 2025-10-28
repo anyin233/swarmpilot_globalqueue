@@ -6,6 +6,8 @@ Falls back to original NumPy implementation if Numba is not available.
 
 import numpy as np
 import warnings
+import pyinstrument
+from pathlib import Path
 
 # Try to import Numba, fallback to original implementation if not available
 try:
@@ -231,8 +233,33 @@ def build_cdf_fn_compiled(p_grid, q_grid):
 
     return F
 
+@njit(cache=True, fastmath=True)
+def prepare_cdf(p_x, q_x, p_y, q_y, Qy):
+    # Prepare CDF parameters for X
+    p_x = np.asarray(p_x, dtype=np.float64)
+    q_x = np.asarray(q_x, dtype=np.float64)
+    x = _enforce_strictly_increasing(q_x.copy())
 
-def convolve_sum_cdf_from_quantiles_compiled(p_x, q_x, p_y, q_y, z_grid=None, n_grid=5000):
+    dpdx_left = (p_x[1] - p_x[0]) / (x[1] - x[0])
+    dpdx_right = (p_x[-1] - p_x[-2]) / (x[-1] - x[-2])
+    x_min, x_max = x[0], x[-1]
+    p_min, p_max = p_x[0], p_x[-1]
+
+    # Augment p-grid of Y
+    p_aug = np.concatenate(([0.0], np.asarray(p_y, dtype=np.float64), [1.0]))
+    y_aug = QY(p_aug)
+
+    w = np.diff(p_aug)
+    w = np.maximum(w, 0.0)
+    w = w / w.sum()
+
+    p_mid = (p_aug[:-1] + p_aug[1:]) / 2.0
+    y_nodes = QY(p_mid)
+    
+    return y_nodes
+
+# @pyinstrument.profile(interval=0.0001, use_timing_thread=True)
+def convolve_sum_cdf_from_quantiles_compiled(p_x, q_x, p_y, q_y, n_grid=5000):
     """
     Compiled deterministic convolution for Z=X+Y using Numba JIT.
     Significantly faster than the original implementation for large grids.
@@ -260,22 +287,36 @@ def convolve_sum_cdf_from_quantiles_compiled(p_x, q_x, p_y, q_y, z_grid=None, n_
 
     p_mid = (p_aug[:-1] + p_aug[1:]) / 2.0
     y_nodes = QY(p_mid)
+    
 
     # Build z-grid if not provided
     QX = build_quantile_fn_compiled(p_x, q_x)
     x_min_q, x_max_q = QX(np.array([0.001, 0.999]))
     y_min_q, y_max_q = QY(np.array([0.001, 0.999]))
 
-    if z_grid is None:
-        z_min = float(x_min_q + y_min_q) - 5.0
-        z_max = float(x_max_q + y_max_q) + 5.0
-        z_grid = np.linspace(z_min, z_max, int(n_grid))
-    else:
-        z_grid = np.asarray(z_grid, dtype=np.float64)
+    # if z_grid is None:
+    z_min = float(x_min_q + y_min_q) - 5.0
+    z_max = float(x_max_q + y_max_q) + 5.0
+    z_grid = np.linspace(z_min, z_max, int(n_grid))
+    # else:
+    #     z_grid = np.asarray(z_grid, dtype=np.float64)
 
     # Compute convolution using compiled parallel function
     FZ = _convolve_cdf_core(z_grid, y_nodes, w, x, p_x, x_min, x_max, p_min, p_max, dpdx_left, dpdx_right)
 
+    # profiler.stop()
+    # # Print results to console
+    # print(profiler.output_text(unicode=True, color=True))
+
+    # # Save HTML report
+    # output_dir = Path(__file__).parent.parent / "profile_reports"
+    # output_dir.mkdir(exist_ok=True)
+
+    # html_path = output_dir / f"quantile_profile.html"
+    # with open(html_path, "w") as f:
+    #     f.write(profiler.output_html())
+
+    # print(f"\nHTML report saved to: {html_path}")
     return z_grid, FZ
 
 

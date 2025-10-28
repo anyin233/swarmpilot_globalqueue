@@ -563,7 +563,7 @@ class PredictorClient:
 
         # Build trace object with model_id for proper model type detection
         trace = {"input_feature": input_features, "model_id": model_name} if input_features else {"model_id": model_name}
-        logger.info(f"feature: {trace}")
+        logger.debug(f"feature: {trace}")
         # Extract optional parameters
         confidence_level = metadata.get("confidence_level", 0.95)
         lookup_table = metadata.get("lookup_table", False)

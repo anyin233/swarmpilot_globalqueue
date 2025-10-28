@@ -46,6 +46,35 @@ class TaskPrediction:
     task_id: str
     quantiles: List[float]
     
+def sample_from_quantile_distribution(quantiles, values, n_samples=1000, seed=None):
+    """
+    Sample from a quantile distribution
+
+    Parameters:
+    -----------
+    quantiles : array
+        Quantile points
+    values : array
+        Corresponding values
+    n_samples : int
+        Number of samples
+    seed : int, optional
+        Random seed
+
+    Returns:
+    --------
+    array : Sampled values
+    """
+    if seed is not None:
+        np.random.seed(seed)
+
+    # Generate uniformly distributed random quantiles
+    random_quantiles = np.random.uniform(0, 1, n_samples)
+
+    # Use linear interpolation to sample from the quantile distribution
+    samples = np.interp(random_quantiles, quantiles, values)
+
+    return samples
 
 class QuantileProb:
     """Utility class for quantile distribution"""
@@ -55,12 +84,17 @@ class QuantileProb:
             self.values = [0.0] * len(self.quantiles)
         else:
             self.values = values
+
         
     def add(self, values: List[float]) -> None:
         assert len(values) == len(self.quantiles), "Number of quantile value not aligned with this one"
         # Assume input distribution is independ with this one
         # Sample -> Add -> Done
-        self.values = qc.sum_quantiles(self.quantiles, self.values, self.quantiles, values, p_eval=self.quantiles)
+        samples_self = sample_from_quantile_distribution(self.quantiles, self.values)
+        samples_other = sample_from_quantile_distribution(self.quantiles, values)
+        
+        sum_samples = samples_self + samples_other
+        self.values = np.quantile(sum_samples, self.quantiles)
     
     def sub(self, values: List[float]):
         """
@@ -110,11 +144,7 @@ class QuantileProb:
                     neg_values.append(neg_val)
 
         # Now perform X + (-Y) using the convolution
-        self.values = qc.sum_quantiles(
-            self.quantiles, self.values,
-            neg_quantiles, neg_values,
-            p_eval=self.quantiles
-        )
+        self.add(neg_values)
 
     def random_choice(self) -> float:
         """
@@ -415,7 +445,7 @@ class ProbabilisticQueueStrategy(BaseStrategy):
             queue_state.task_count += 1
             queue_state.last_update_time = time.time()
 
-            logger.info(
+            logger.debug(
                 f"Updated queue state for instance {selected_instance.uuid}: "
                 f"quantiles={queue_state.dist.values}, tasks={queue_state.task_count}"
             )
