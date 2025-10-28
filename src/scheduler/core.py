@@ -6,13 +6,15 @@ Integrates with TaskTracker for task state management.
 """
 
 from loguru import logger
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
 from uuid import uuid4, UUID
 import yaml
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, Future
 import threading
+from queue import Queue, Empty
+from dataclasses import dataclass
 
 from .client import TaskInstanceClient
 from .task_tracker import TaskTracker
@@ -31,6 +33,20 @@ from .model_scheduler import ModelSchedulerManager
 from .lockfree_scheduler_manager import LockFreeSchedulerManager
 from .lockfree_task_tracker import LockFreeTaskTracker
 from .utils import is_valid_uuid
+
+
+@dataclass
+class QueueUpdateTask:
+    """Represents a queue update task to be processed asynchronously"""
+    task_type: str  # 'schedule' or 'completion'
+    task_id: str
+    timestamp: float
+    # For schedule updates
+    selected_instance: Optional[TaskInstance] = None
+    request: Optional[SelectionRequest] = None
+    # For completion updates
+    instance_uuid: Optional[UUID] = None
+    execution_time: Optional[float] = None
 
 
 class SwarmPilotScheduler:
@@ -98,6 +114,14 @@ class SwarmPilotScheduler:
         # Cache for instance_id to UUID mapping to avoid expensive lookups
         # Format: {instance_id: uuid}
         self._instance_id_to_uuid: Dict[str, UUID] = {}
+
+        # Background queue for processing queue updates
+        self._queue_update_queue: Queue[Optional[QueueUpdateTask]] = Queue()
+        self._queue_update_thread: Optional[threading.Thread] = None
+        self._queue_update_shutdown = threading.Event()
+
+        # Start background queue update worker
+        self._start_queue_update_worker()
 
         # Reference to result submission manager (will be injected from api.py)
         self.result_submission_manager = None
@@ -741,17 +765,11 @@ class SwarmPilotScheduler:
             # Store arrival time
             self.request_times[task_id] = (arrival_time, request.request_id)
 
-            # Execute dispatch_task_sync and update_queue in parallel
-            enqueue_response = None
-            update_queue_error = None
+            # Dispatch task first (critical operation)
+            dispatch_start_time = time.time()
 
-            parallel_start_time = time.time()
-            
-
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                # Submit dispatch task
-                dispatch_future = executor.submit(
-                    self._dispatch_task_sync,
+            try:
+                enqueue_response = self._dispatch_task_sync(
                     instance_id=instance_id,
                     task_id=task_id,
                     model_name=request.model_type,
@@ -759,35 +777,21 @@ class SwarmPilotScheduler:
                     metadata=request.metadata,
                     instance_client=selected_instance.instance
                 )
+            except Exception as e:
+                # If dispatch fails, this is critical - re-raise the exception
+                raise e
 
-                # Submit queue update
-                update_future = executor.submit(
-                    self.strategy.update_queue,
-                    selected_instance=selected_instance,
-                    request=selection_req,
-                    task_id=task_id
-                )
+            dispatch_end_time = time.time()
+            enqueue_time = dispatch_end_time  # For backward compatibility
 
-                # Wait for both to complete
-                try:
-                    # Get dispatch result (this is critical, so we wait for it)
-                    enqueue_response = dispatch_future.result()
-                except Exception as e:
-                    # If dispatch fails, this is critical - re-raise the exception
-                    raise e
+            # Submit queue update to background worker (non-blocking)
+            self._submit_queue_update(
+                selected_instance=selected_instance,
+                request=selection_req,
+                task_id=task_id
+            )
 
-                # Get queue update result (non-critical, so we just log errors)
-                try:
-                    update_future.result()
-                except Exception as e:
-                    update_queue_error = e
-                    logger.warning(f"Failed to update queue state: {e}")
-
-            parallel_end_time = time.time()
-            enqueue_time = parallel_end_time  # For backward compatibility
-            queue_updated_time = parallel_end_time
-            
-            logger.info(f"Schedule finished, overhead: Selection: {selection_time - arrival_time:.3f}s Parallel(Enqueue+QueueUpdate): {parallel_end_time - parallel_start_time:.3f}s")
+            logger.info(f"Schedule finished, overhead: Selection: {selection_time - arrival_time:.3f}s Dispatch: {dispatch_end_time - dispatch_start_time:.3f}s (queue update queued)")
             # Save routing information
             self.last_routing_info = {
                 "request_id": request.request_id,
@@ -889,8 +893,8 @@ class SwarmPilotScheduler:
 
             del self.request_times[task_id]
 
-        # Update queue state
-        self.strategy.update_queue_on_completion(
+        # Submit queue update to background worker (non-blocking)
+        self._submit_completion_update(
             instance_uuid=instance_uuid,
             task_id=task_id,
             execution_time=execution_time
@@ -932,3 +936,109 @@ class SwarmPilotScheduler:
             "max_total_time_ms": max(total_times),
             "recent_tasks": recent_tasks
         }
+
+    def _start_queue_update_worker(self):
+        """Start the background thread for processing queue updates"""
+        self._queue_update_thread = threading.Thread(
+            target=self._queue_update_worker,
+            name="QueueUpdateWorker",
+            daemon=True
+        )
+        self._queue_update_thread.start()
+        logger.info("Started background queue update worker thread")
+
+    def _queue_update_worker(self):
+        """Background worker that processes queue update tasks sequentially"""
+        logger.info("Queue update worker started")
+
+        while not self._queue_update_shutdown.is_set():
+            try:
+                # Get task from queue with timeout to check shutdown flag periodically
+                task = self._queue_update_queue.get(timeout=1.0)
+
+                if task is None:  # Poison pill for shutdown
+                    break
+
+                # Process the queue update based on task type
+                try:
+                    if task.task_type == 'schedule':
+                        # Handle schedule queue update
+                        self.strategy.update_queue(
+                            selected_instance=task.selected_instance,
+                            request=task.request,
+                            task_id=task.task_id
+                        )
+                    elif task.task_type == 'completion':
+                        # Handle completion queue update
+                        self.strategy.update_queue_on_completion(
+                            instance_uuid=task.instance_uuid,
+                            task_id=task.task_id,
+                            execution_time=task.execution_time
+                        )
+                    else:
+                        logger.error(f"Unknown task type: {task.task_type}")
+                        continue
+
+                    elapsed = time.time() - task.timestamp
+                    logger.debug(
+                        f"Queue update ({task.task_type}) completed for task {task.task_id} "
+                        f"(queued for {elapsed:.3f}s)"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to update queue state for task {task.task_id} ({task.task_type}): {e}"
+                    )
+
+            except Empty:
+                # Timeout occurred, loop back to check shutdown flag
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error in queue update worker: {e}")
+
+        logger.info("Queue update worker stopped")
+
+    def _submit_queue_update(self, selected_instance: TaskInstance,
+                            request: SelectionRequest, task_id: str):
+        """Submit a schedule queue update task to the background worker"""
+        task = QueueUpdateTask(
+            task_type='schedule',
+            task_id=task_id,
+            timestamp=time.time(),
+            selected_instance=selected_instance,
+            request=request
+        )
+
+        self._queue_update_queue.put(task)
+        logger.debug(f"Queued schedule update for {task_id}, queue size: {self._queue_update_queue.qsize()}")
+
+    def _submit_completion_update(self, instance_uuid: UUID, task_id: str,
+                                 execution_time: float):
+        """Submit a completion queue update task to the background worker"""
+        task = QueueUpdateTask(
+            task_type='completion',
+            task_id=task_id,
+            timestamp=time.time(),
+            instance_uuid=instance_uuid,
+            execution_time=execution_time
+        )
+
+        self._queue_update_queue.put(task)
+        logger.debug(f"Queued completion update for {task_id}, queue size: {self._queue_update_queue.qsize()}")
+
+    def shutdown(self):
+        """Shutdown the scheduler and background workers cleanly"""
+        logger.info("Shutting down scheduler...")
+
+        # Signal shutdown to worker thread
+        self._queue_update_shutdown.set()
+
+        # Send poison pill to wake up worker if it's waiting
+        self._queue_update_queue.put(None)
+
+        # Wait for worker thread to finish
+        if self._queue_update_thread and self._queue_update_thread.is_alive():
+            self._queue_update_thread.join(timeout=5.0)
+            if self._queue_update_thread.is_alive():
+                logger.warning("Queue update worker thread did not stop cleanly")
+
+        logger.info("Scheduler shutdown complete")

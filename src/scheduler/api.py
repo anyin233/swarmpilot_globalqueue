@@ -1865,12 +1865,15 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on shutdown"""
     logger.info("Shutting down SwarmPilot Scheduler...")
-    
+
     # Disable async scheduling if enabled
     if scheduler.is_async_scheduling_enabled():
         logger.info("Disabling async scheduling...")
         scheduler.disable_async_scheduling()
-    
+
+    # Shutdown the scheduler (including background queue worker)
+    scheduler.shutdown()
+
     logger.info("SwarmPilot Scheduler shutdown complete")
 
 
