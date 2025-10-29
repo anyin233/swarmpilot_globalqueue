@@ -289,15 +289,10 @@ class ProbabilisticQueueStrategy(BaseStrategy):
     
 
     def _random_sample_based_shortest_queue_selection(self, dists: List[QuantileProb]):
-        candidcates = []
         
-        for i, dist in enumerate(dists):
-            u = random.random()
-            candidcates.append((dist.random_choice(), i))
+        choice = min([(dist.random_choice(), i) for i, dist in enumerate(dists)], key=lambda x: x[0])
         
-        choice = sorted(candidcates, key=lambda x: x[0])
-        
-        return choice[0]
+        return choice
 
     def _select_from_candidates(
         self,
